@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+"""Автономная проверка логики бота без сети и Telegram.
+
+Запуск:  python tools/selftest.py
+
+Проверяет: инициализацию БД, выдачу ключей из пула, продление, оплату заказа,
+пополнение баланса, реферальные бонусы, промокоды, напоминания, отключение
+истёкших подписок, сборку ссылок 3x-ui и валидацию конфигурации.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+from datetime import timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+TMP = tempfile.mkdtemp(prefix="dfvpnbot-selftest-")
+os.environ.update({
+    "BOT_TOKEN": "123456:TEST-TOKEN",
+    "ADMIN_IDS": "777",
+    "DB_PATH": str(Path(TMP) / "test.sqlite3"),
+    "VPN_PANEL": "pool",
+    "PAYMENT_METHODS": "stars,balance,manual",
+    "TRIAL_ENABLED": "true",
+    "TRIAL_DAYS": "2",
+    "REF_PERCENT": "20",
+    "LOG_FILE": str(Path(TMP) / "bot.log"),
+})
+
+from app.config import load_config, validate  # noqa: E402
+from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
+from app.keyboards import main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
+from app.runtime import runtime as rt  # noqa: E402
+from app.services.panels import (  # noqa: E402
+    BasePanel,
+    ClaimedClient,
+    MarzbanPanel,
+    PoolPanel,
+    XuiPanel,
+    _as_dict,
+    _build_link,
+    get_panel,
+)
+from app.services import panels as panels_mod  # noqa: E402
+from app.services.claims import bind_claim, build_claim_link, claim_token, parse_token, token_expired  # noqa: E402
+from app.services.subs import (  # noqa: E402
+    complete_order,
+    grant_subscription,
+    process_expired,
+    renewal_available,
+    send_reminders,
+)
+
+PASSED: list[str] = []
+FAILED: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        PASSED.append(name)
+        print(f"  ✅ {name}")
+    else:
+        FAILED.append(f"{name} — {detail}")
+        print(f"  ❌ {name} — {detail}")
+
+
+class FakeBot:
+    """Заглушка aiogram.Bot: запоминает исходящие сообщения."""
+
+    def __init__(self) -> None:
+        self.messages: list[tuple[int, str]] = []
+        self.photos: list[int] = []
+
+    async def send_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=None, **kw):
+        self.messages.append((int(chat_id), text))
+        return None
+
+    async def send_photo(self, chat_id, photo=None, caption=None, **kw):
+        self.photos.append(int(chat_id))
+        return None
+
+    async def send_invoice(self, **kw):
+        return None
+
+    async def refund_star_payment(self, **kw):
+        return True
+
+    def last_text_for(self, chat_id: int) -> str:
+        for cid, text in reversed(self.messages):
+            if cid == chat_id:
+                return text
+        return ""
+
+    def all_text_for(self, chat_id: int) -> str:
+        return "\n".join(text for cid, text in self.messages if cid == chat_id)
+
+
+async def run() -> None:
+    cfg = load_config()
+    print("\n1. Конфигурация и БД")
+    problems = validate(cfg)
+    check("конфиг валиден", problems == [], "; ".join(problems))
+    db = Database(cfg.db_path)
+    await db.connect()
+    await rt.load(db, cfg)
+    check("тарифы посеяны по умолчанию", len(await db.active_plans()) == 4)
+    check("рантайм подхватил реф-процент из .env", rt.ref_percent == 20, str(rt.ref_percent))
+
+    bot = FakeBot()
+    print("\n2. Выдача и продление подписок (панель pool)")
+    await db.ensure_user(1001, "alice", "Алиса")
+    await db.ensure_user(1002, "bob", "Боб")
+    await db.add_keys([f"vless://test-key-{i}@example.com:443#test{i}" for i in range(3)], plan_code="1m")
+    sub = await grant_subscription(bot, cfg, db, 1001, "1m")
+    check("подписка создана", sub is not None and sub["status"] == "active")
+    check("ключ взят из пула", "vless://test-key" in (sub["vpn_key"] or ""), sub["vpn_key"] or "")
+    check("срок = 30 дней", 29 <= (from_iso(sub["expires_at"]) - utcnow()).days + 1 <= 30)
+    check("пользователю отправлена карточка", "VPN готов" in bot.all_text_for(1001))
+    check("QR отправлен", 1001 in bot.photos)
+
+    extended = await grant_subscription(bot, cfg, db, 1001, "1m")
+    delta_days = (from_iso(extended["expires_at"]) - from_iso(sub["expires_at"])).days
+    check("продление сдвинуло срок на 30 дней", delta_days == 30, str(delta_days))
+    check("ключ при продлении не изменился", extended["vpn_key"] == sub["vpn_key"])
+    check("в пуле осталось 2 свободных ключа", (await db.pool_stats())["free"] == 2)
+
+    print("\n2b. Возобновление после истечения (тот же клиент)")
+    await db.update_subscription(int(sub["id"]), status="expired",
+                                 expires_at=to_iso(utcnow() - timedelta(days=10)))
+    revived = await grant_subscription(bot, cfg, db, 1001, "3m")
+    check("истёкшая подписка переиспользует того же клиента",
+          int(revived["id"]) == int(sub["id"]), str(revived["id"]))
+    check("конфиг не изменился", revived["vpn_key"] == sub["vpn_key"])
+    check("подписка снова активна", revived["status"] == "active", str(revived["status"]))
+    check("срок считается от текущего момента",
+          (from_iso(revived["expires_at"]) - utcnow()).days >= 88,
+          str((from_iso(revived["expires_at"]) - utcnow()).days))
+    check("новых подписок не появилось", len(await db.user_subscriptions(1001)) == 1)
+    check("новый ключ из пула не потрачен", (await db.pool_stats())["free"] == 2)
+
+    print("\n3. Пробный период")
+    trial = await grant_subscription(bot, cfg, db, 1002, "trial")
+    check("пробная подписка выдана", trial is not None and trial["panel"] == "pool")
+    trial_days = (from_iso(trial["expires_at"]) - utcnow()).days
+    check("пробный срок из runtime (2 дня)", trial_days in (1, 2), str(trial_days))
+    upgrade = await grant_subscription(bot, cfg, db, 1002, "1m")
+    check("продление подняло лимит устройств до тарифа (1→2)", int(upgrade["devices"]) == 2, str(upgrade["devices"]))
+    check("продление сохранило безлимит по трафику (0)", int(upgrade["traffic_gb"]) == 0, str(upgrade["traffic_gb"]))
+    up_3 = await grant_subscription(bot, cfg, db, 1002, "3m")
+    check("тариф на 3 устройства поднял лимит (2→3)", int(up_3["devices"]) == 3, str(up_3["devices"]))
+    down_2 = await grant_subscription(bot, cfg, db, 1002, "1m")
+    check("тариф на 2 устройства понизил лимит (3→2)", int(down_2["devices"]) == 2, str(down_2["devices"]))
+
+    print("\n3.5 Окно продления (за notify_days_before до конца)")
+    fresh = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(sub["id"]),))
+    check("продление вне окна (30 дн.) недоступно", renewal_available(fresh, cfg) is False)
+    await db.update_subscription(int(sub["id"]), expires_at=to_iso(utcnow() + timedelta(days=2)))
+    soon = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(sub["id"]),))
+    check("продление в окне (2 дн.) доступно", renewal_available(soon, cfg) is True)
+
+    print("\n4. Заказы, баланс и реферальные бонусы")
+    await db.ensure_user(2001, "ref_user", "Реферер")
+    await db.ensure_user(3001, "buyer", "Покупатель", referrer_id=2001)
+    order_id = await db.create_order(3001, "1m", 299, 299, None, "stars")
+    await complete_order(bot, cfg, db, order_id, payment_id="star-charge-1")
+    order = await db.get_order(order_id)
+    check("заказ помечен оплаченным", order["status"] == "paid")
+    buyer_sub = await db.active_subscription(3001)
+    check("подписка выдана по заказу", buyer_sub is not None)
+
+    referrer = await db.get_user(2001)
+    check("реферальный бонус 20% начислен", int(referrer["balance"]) == 59, str(referrer["balance"]))
+    check("реферер уведомлён", "Реферальный бонус" in bot.last_text_for(2001))
+
+    topup_id = await db.create_order(3001, "topup", 500, 500, None, "stars", kind="topup")
+    await complete_order(bot, cfg, db, topup_id, payment_id="star-charge-2")
+    buyer = await db.get_user(3001)
+    check("баланс пополнен на 500", int(buyer["balance"]) == 500, str(buyer["balance"]))
+
+    pay_order = await db.create_order(3001, "1m", 299, 299, None, "balance")
+    await complete_order(bot, cfg, db, pay_order)
+    buyer = await db.get_user(3001)
+    check("списание баланса выполнено вручную (проверка сценария)", int(buyer["balance"]) == 500)
+
+    print("\n5. Промокоды")
+    await db.create_promo("vpn10", "percent", 10, max_uses=1, expires_at=None)
+    ok, reason, promo = await db.promo_valid("VPN10", 3001)
+    check("промокод валиден для нового пользователя", ok, reason)
+    await db.apply_promo("VPN10", 3001)
+    ok2, reason2, _ = await db.promo_valid("VPN10", 3001)
+    check("повторное использование запрещено", not ok2, reason2)
+    ok3, reason3, _ = await db.promo_valid("VPN10", 4001)
+    check("лимит активаций соблюдается", not ok3, reason3)
+
+    base, discount = 1000, 0
+    promo_row = await db.get_promo("VPN10")
+    discount = base * int(promo_row["value"]) // 100
+    check("расчёт скидки 10% корректен", discount == 100, str(discount))
+
+    print("\n6. Напоминания и истечение подписок")
+    await db.update_subscription(int(buyer_sub["id"]), expires_at=to_iso(utcnow() + timedelta(hours=20)))
+    await send_reminders(bot, cfg, db)
+    check("напоминание за 1 день отправлено", "заканчивается" in bot.last_text_for(3001))
+    await db.update_subscription(int(buyer_sub["id"]), expires_at=to_iso(utcnow() - timedelta(minutes=5)))
+    await process_expired(bot, cfg, db)
+    refreshed = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(buyer_sub["id"]),))
+    check("истёкшая подписка помечена expired", refreshed["status"] == "expired", refreshed["status"])
+    check("пользователь уведомлён об окончании", "закончилась" in bot.last_text_for(3001))
+
+    print("\n7. Сборка ссылок 3x-ui")
+    vless_inbound = {
+        "id": 1, "protocol": "vless", "port": 443,
+        "settings": '{"clients": [{"id": "uuid-1", "flow": "xtls-rprx-vision", "email": "tg1_1m_x"}]}',
+        "streamSettings": (
+            '{"network": "tcp", "security": "reality", "realitySettings": {"serverNames": ["www.microsoft.com"], '
+            '"shortIds": ["abcd1234"], "settings": {"publicKey": "PUBKEY123", "fingerprint": "chrome"}}}'
+        ),
+    }
+    link = _build_link(vless_inbound, {"id": "uuid-1", "flow": "xtls-rprx-vision", "email": "tg1_1m_x"}, "1.2.3.4")
+    check("vless+reality ссылка собрана", link.startswith("vless://uuid-1@1.2.3.4:443?"), link)
+    check("в ссылке есть pbk/sni/sid", all(p in link for p in ("pbk=PUBKEY123", "sni=www.microsoft.com", "sid=abcd1234")))
+
+    ws_inbound = {
+        "id": 2, "protocol": "vless", "port": 8443,
+        "settings": '{"clients": [{"id": "uuid-2", "email": "u2"}]}',
+        "streamSettings": (
+            '{"network": "ws", "security": "tls", "tlsSettings": {"serverName": "cdn.example.com", "alpn": ["h2"]},'
+            ' "wsSettings": {"path": "/secret", "headers": {"Host": "cdn.example.com"}}}'
+        ),
+    }
+    ws_link = _build_link(ws_inbound, {"id": "uuid-2", "email": "u2"}, "example.com")
+    check("vless+ws+tls ссылка собрана", "type=ws" in ws_link and "path=%2Fsecret" in ws_link, ws_link)
+
+    vmess_inbound = {
+        "id": 3, "protocol": "vmess", "port": 8080,
+        "settings": '{"clients": [{"id": "uuid-3", "alterId": 0, "email": "u3"}]}',
+        "streamSettings": '{"network": "tcp", "security": "none"}',
+    }
+    vmess_link = _build_link(vmess_inbound, {"id": "uuid-3", "alterId": 0, "email": "u3"}, "example.com")
+    check("vmess ссылка (base64) собрана", vmess_link.startswith("vmess://"), vmess_link[:20])
+
+    trojan_inbound = {
+        "id": 4, "protocol": "trojan", "port": 443,
+        "settings": '{"clients": [{"id": "pass123", "email": "u4"}]}',
+        "streamSettings": '{"network": "tcp", "security": "tls", "tlsSettings": {"serverName": "t.example.com"}}',
+    }
+    trojan_link = _build_link(trojan_inbound, {"id": "pass123", "email": "u4"}, "example.com")
+    check("trojan ссылка собрана", trojan_link.startswith("trojan://pass123@"), trojan_link)
+
+    print("\n8. Инициализация панелей")
+    xui = XuiPanel(cfg)
+    check("XuiPanel создан (pool-конфиг подставляется)", xui.base == "")
+    os.environ["XUI_URL"] = "http://127.0.0.1:2053/secretpath"
+    os.environ["XUI_USERNAME"] = "admin"
+    os.environ["XUI_PASSWORD"] = "pass"
+    xui_cfg = load_config()
+    XuiPanel(xui_cfg)
+    check("XUI URL разобран", XuiPanel(xui_cfg).base.endswith("/secretpath"))
+    mb = MarzbanPanel(cfg) if cfg.marzban_url else None
+    check("MarzbanPanel корректно требует настройки", mb is None or mb.base == "")
+    panel = get_panel(cfg, db)
+    check("фабрика возвращает PoolPanel", isinstance(panel, PoolPanel))
+
+    print("\n8b. Совместимость форм inbound (классика/новая схема clients)")
+    check("_as_dict читает JSON-строку streamSettings", _as_dict('{"security": "reality"}') == {"security": "reality"})
+    check("_as_dict принимает вложенный объект", _as_dict({"network": "tcp"}) == {"network": "tcp"})
+    check("_as_dict устойчив к мусору", _as_dict("не json") == {} and _as_dict(None) == {})
+    up = XuiPanel._update_payload({"uuid": "u-1", "email": "e", "allowedIPs": "", "limitIp": 2, "totalGB": 100})
+    check("update-тело: id = uuid (не числовой id)", up["id"] == "u-1", str(up.get("id")))
+    check("update-тело: allowedIPs приводится к массиву", up["allowedIPs"] == [])
+    check("update-тело: прочие поля сохраняются", up["limitIp"] == 2 and up["totalGB"] == 100)
+
+    print("\n9. Клавиатуры и статистика")
+    check("главное меню собирается", main_menu(True, True) is not None)
+    check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
+    check("выбор способа оплаты собирается", payment_methods_kb(["stars", "balance"], 1, 100) is not None)
+    stats = await db.stats()
+    check("статистика считается", stats["users_total"] >= 4 and stats["revenue_total"] >= 598, str(stats["revenue_total"]))
+    check("топ рефералов не пуст", len(await db.top_referrers()) >= 1)
+
+
+    print("\n10. Клиент ЮKassa (HTTP подменён заглушкой)")
+    import json as _json
+
+    from app.services.payments import YooKassaClient
+
+    class FakeResponse:
+        def __init__(self, status: int, payload: dict) -> None:
+            self.status = status
+            self._payload = payload
+
+        async def text(self) -> str:
+            return _json.dumps(self._payload)
+
+        async def json(self, content_type=None) -> dict:
+            return self._payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeSession:
+        def __init__(self, responses: list) -> None:
+            self.responses = responses
+            self.calls: list = []
+            self.closed = False
+
+        def post(self, url, json=None, headers=None):
+            self.calls.append(("POST", url, json, headers))
+            status, payload = self.responses.pop(0)
+            return FakeResponse(status, payload)
+
+        def get(self, url, params=None):
+            self.calls.append(("GET", url, params, None))
+            status, payload = self.responses.pop(0)
+            return FakeResponse(status, payload)
+
+    os.environ["YOOKASSA_SHOP_ID"] = "123456"
+    os.environ["YOOKASSA_SECRET_KEY"] = "test_secret_key"
+    os.environ["YOOKASSA_RETURN_URL"] = "https://t.me/test_bot"
+    yk_cfg = load_config()
+    client = YooKassaClient(yk_cfg)
+
+    session = FakeSession([(200, {"id": "pay-1", "status": "pending",
+                                  "confirmation": {"confirmation_url": "https://yoomoney.ru/checkout/1"}})])
+    async def fake_session():
+        return session
+    client._get_session = fake_session  # type: ignore[assignment]
+
+    payment = await client.create_payment(amount_rub=150, description="VPN 1m заказ #1",
+                                          metadata={"order_id": 1, "user_id": 555})
+    method, url, payload, headers = session.calls[0]
+    check("платёж создан через API v3", url.endswith("/v3/payments") and method == "POST", url)
+    check("сумма передана в формате 150.00", payload["amount"]["value"] == "150.00", str(payload["amount"]))
+    check("валюта RUB и capture=true", payload["amount"]["currency"] == "RUB" and payload["capture"] is True)
+    check("return_url из конфига", payload["confirmation"]["return_url"] == "https://t.me/test_bot")
+    check("metadata содержит заказ", payload["metadata"]["order_id"] == "1", str(payload["metadata"]))
+    check("Idempotence-Key передан", bool(headers.get("Idempotence-Key")), str(headers))
+    check("confirmation_url получен", payment["confirmation"]["confirmation_url"].startswith("https://yoomoney.ru"))
+
+    session.responses.append((200, {"status": "succeeded", "paid": True, "amount": {"value": "150.00"}}))
+    check("успешный платёж подтверждён", await client.is_paid("pay-1", 150) is True)
+
+    session.responses.append((200, {"status": "succeeded", "paid": True, "amount": {"value": "100.00"}}))
+    check("платёж с чужой суммой отклонён", await client.is_paid("pay-1", 150) is False)
+
+    session.responses.append((200, {"status": "pending", "paid": False, "amount": {"value": "299.00"}}))
+    check("неоплаченный платёж отклонён", await client.is_paid("pay-1", 150) is False)
+
+    session.responses.append((400, {"description": "bad request"}))
+    check("ошибка API обрабатывается", await client.is_paid("pay-x", 150) is False)
+
+    print("\n11. Вебхук ЮKassa: разбор уведомления")
+    from app.webhook import YOOKASSA_NETS, _ip_allowed
+    check("IP ЮKassa из белого списка разрешён", _ip_allowed("185.71.76.10"))
+    check("посторонний IP отклонён", not _ip_allowed("8.8.8.8"))
+    check("диапазоны IP заданы", len(YOOKASSA_NETS) >= 6)
+
+
+    print("\n12. ЮMoney: форма и проверка перевода")
+    from app.services.payments import YooMoneyClient
+
+    os.environ["PAYMENT_METHODS"] = "yoomoney,stars,balance,manual"
+    os.environ["YOOMONEY_WALLET"] = "410011234567890"
+    os.environ["YOOMONEY_TOKEN"] = "test-yoomoney-token"
+    ym_cfg = load_config()
+    check("yoomoney_enabled с токеном", ym_cfg.yoomoney_enabled)
+    ymc = YooMoneyClient(ym_cfg)
+    url = ymc.form_url(150, 7)
+    check("форма содержит кошелёк", "receiver=410011234567890" in url, url)
+    check("форма содержит label заказа", "label=dfvpn-order-7" in url, url)
+    check("форма содержит сумму", "sum=150.00" in url, url)
+
+    session = FakeSession([(200, {"operations": [
+        {"direction": "in", "status": "success", "label": "dfvpn-order-7",
+         "amount": "150.00", "operation_id": 987654},
+    ]})])
+    async def fake_session():
+        return session
+    ymc._get_session = fake_session  # type: ignore[assignment]
+    found = await ymc.find_payment(7, 150)
+    check("входящий перевод найден по label", found == "987654", str(found))
+
+    session.responses.append((200, {"operations": [
+        {"direction": "in", "status": "success", "label": "dfvpn-order-7",
+         "amount": "100.00", "operation_id": 1},
+    ]}))
+    check("перевод с чужой суммой отклонён", await ymc.find_payment(7, 150) is None)
+
+    session.responses.append((200, {"operations": [
+        {"direction": "out", "status": "success", "label": "dfvpn-order-7",
+         "amount": "150.00", "operation_id": 2},
+    ]}))
+    check("исходящий перевод игнорируется", await ymc.find_payment(7, 150) is None)
+
+    session.responses.append((401, {"error": "unauthorized"}))
+    check("ошибка API ЮMoney обрабатывается", await ymc.find_payment(7, 150) is None)
+
+    check("профиль содержит рефералку", "ref:open" in profile_kb(True).inline_keyboard.__repr__())
+    check("кнопка рефералки скрыта при REF_ENABLED=false",
+          "ref:open" not in profile_kb(True, False).inline_keyboard.__repr__())
+
+    print("\n12. Конкурентность и идемпотентность выдачи")
+    # 12a. Двойное завершение одного заказа: только один вызов "захватывает" pending -> paid
+    await db.ensure_user(5001, "carol", "Кэрол")
+    await db.add_keys(["vless://race-key-1@example.com:443#race1",
+                       "vless://race-key-2@example.com:443#race2"], plan_code="1m")
+    race_order = await db.create_order(5001, "1m", 150, 150, None, "balance", "subscription")
+    results = await asyncio.gather(*(complete_order(bot, cfg, db, race_order) for _ in range(5)))
+    order_5001 = await db.get_order(race_order)
+    subs_5001 = await db.fetchall("SELECT * FROM subscriptions WHERE user_id = 5001")
+    pays_5001 = await db.fetchall("SELECT * FROM payments_log WHERE user_id = 5001 AND kind = 'order'")
+    check("все вызовы complete_order вернули успех (идемпотентно)", all(results), str(results))
+    check("заказ перешёл в paid ровно один раз (статус paid)", order_5001["status"] == "paid")
+    check("подписка выдана ровно один раз", len(subs_5001) == 1, str(len(subs_5001)))
+    check("платёж зафиксирован ровно один раз", len(pays_5001) == 1, str(len(pays_5001)))
+
+    # 12b. Параллельный take_key: два заказа не могут получить один и тот же ключ
+    await db.ensure_user(5002, "dave", "Дейв")
+    await db.ensure_user(5003, "eve", "Ева")
+    await db.add_keys(["vless://dup-a@example.com:443#dupa",
+                       "vless://dup-b@example.com:443#dupb"], plan_code="3m")
+    keys = await asyncio.gather(db.take_key("3m", 5002), db.take_key("3m", 5003))
+    values = [k["content"] for k in keys if k is not None]
+    check("параллельный take_key вернул оба ключа", len(values) == 2, str(values))
+    check("ключи не повторяются", len(set(values)) == 2, str(values))
+
+    # 12c. Атомарность add_balance: начисление и payments_log появляются вместе
+    await db.ensure_user(5004, "frank", "Фрэнк")
+    await asyncio.gather(*(db.add_balance(5004, 10, note=f"c{i}") for i in range(10)))
+    u5004 = await db.get_user(5004)
+    logs5004 = await db.fetchall("SELECT * FROM payments_log WHERE user_id = 5004")
+    check("10 параллельных начислений дали ровно 100", int(u5004["balance"]) == 100, str(u5004["balance"]))
+    check("каждому начислению соответствует запись в payments_log", len(logs5004) == 10, str(len(logs5004)))
+
+    # 12d. Промокод: лимит max_uses не превышается при параллельной активации
+    await db.create_promo("RACE50", "fixed", 50, max_uses=2, expires_at=None)
+    for uid, name in ((5005, "gina"), (5006, "hugo"), (5007, "ivan")):
+        await db.ensure_user(uid, name, name)
+    reserved = await asyncio.gather(
+        db.reserve_promo("RACE50", 5005),
+        db.reserve_promo("RACE50", 5006),
+        db.reserve_promo("RACE50", 5007),
+    )
+    ok_count = sum(1 for ok, _r, _row in reserved if ok)
+    used_total = int(await db.scalar("SELECT used FROM promos WHERE code = 'RACE50'"))
+    uses_rows = int(await db.scalar("SELECT COUNT(*) FROM promo_uses WHERE code = 'RACE50'"))
+    check("промокод: лимит max_uses=2 соблюдён при параллельной активации",
+          ok_count == 2 and used_total == 2 and uses_rows == 2,
+          f"ok={ok_count}, used={used_total}, rows={uses_rows}")
+
+    # 12e. Промокод: повторная активация тем же пользователем (даже параллельно) отклонена
+    winner = next(uid for uid, (ok, _r, _row) in zip((5005, 5006, 5007), reserved) if ok)
+    twice = await asyncio.gather(db.reserve_promo("RACE50", winner), db.reserve_promo("RACE50", winner))
+    check("промокод: повторная активация тем же пользователем отклонена",
+          not any(ok for ok, _r, _row in twice))
+
+    # 12f. release_promo освобождает лимит для повторного использования
+    await db.release_promo("RACE50", winner)
+    used_after_release = int(await db.scalar("SELECT used FROM promos WHERE code = 'RACE50'"))
+    check("промокод: release уменьшает счётчик", used_after_release == 1, str(used_after_release))
+    await db.ensure_user(5008, "jack", "Джек")
+    ok_refill, _r, _row = await db.reserve_promo("RACE50", 5008)
+    check("промокод: освобождённое место переиспользуется", ok_refill)
+
+    print("\n13. Безопасность вебхука и автоматические бэкапы")
+    # 13a. Фильтр IP webhook-сервера
+    from app.webhook import _client_ip, _ip_allowed
+
+    check("IP из диапазона ЮKassa разрешён", _ip_allowed("185.71.76.5"))
+    check("IP из диапазона ЮKassa (IPv6) разрешён", _ip_allowed("2a02:5180::1"))
+    check("посторонний IP отклоняется", not _ip_allowed("8.8.8.8"))
+    check("некорректный IP отклоняется", not _ip_allowed("not-an-ip"))
+
+    class FakeReq:
+        def __init__(self, remote, xff=None):
+            self.remote = remote
+            self.headers = {"X-Forwarded-For": xff} if xff else {}
+
+    def _sqlite_backup_ok(p: Path) -> bool:
+        if not p.exists():
+            return False
+        con = sqlite3.connect(str(p))
+        try:
+            names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            return {"users", "orders", "subscriptions"} <= names
+        finally:
+            con.close()
+
+    check("без доверия прокси берётся TCP-адрес, XFF игнорируется",
+          _client_ip(FakeReq("10.0.0.1", "185.71.76.5"), trust_proxy=False) == "10.0.0.1")
+    check("с доверием прокси берётся первый адрес из XFF",
+          _client_ip(FakeReq("10.0.0.1", "185.71.76.5, 10.0.0.1"), trust_proxy=True) == "185.71.76.5")
+
+    # 13b. Автоматический бэкап БД с ротацией
+    from app.services.subs import run_db_backup
+
+    import dataclasses as _dc
+
+    backup_cfg = _dc.replace(cfg, backup_interval_minutes=60, backup_keep=2)
+    p1 = await run_db_backup(backup_cfg, db)
+    check("бэкап создан", p1 is not None and Path(p1).exists(), str(p1))
+    check("повторный вызов в пределах интервала ничего не создаёт",
+          await run_db_backup(backup_cfg, db) is None)
+    # форсируем «протухание» интервала: сдвигаем mtime назад
+    os.utime(p1, (time.time() - 7200, time.time() - 7200))
+    made = [p1]
+    for i in range(3):
+        os.utime(made[-1], (time.time() - 7200, time.time() - 7200))
+        time.sleep(1.05)  # уникальная метка имени (секунды)
+        pn = await run_db_backup(backup_cfg, db)
+        if pn:
+            made.append(pn)
+    bdir = Path(cfg.db_path).parent / "backups"
+    remaining = sorted(bdir.glob("dfvpn-*.sqlite3"))
+    check("ротация держит не больше backup_keep копий", len(remaining) <= 2, str([p.name for p in remaining]))
+    check("копия читается как SQLite и содержит таблицы", _sqlite_backup_ok(remaining[-1] if remaining else Path(p1)))
+
+    print("\n14. Привязка существующего клиента панели (QR/claim)")
+
+    class StubXuiPanel(BasePanel):
+        name = "xui"
+        supports_claim = True
+
+        def __init__(self, client: ClaimedClient) -> None:
+            self.client = client
+
+        async def create_client(self, **kwargs):  # pragma: no cover - не используется
+            raise NotImplementedError
+
+        async def list_claimable(self):
+            return [self.client]
+
+    cfg_claim = dataclasses.replace(cfg, claim_enabled=True, claim_secret="selftest-secret")
+    legacy = ClaimedClient(
+        email="legacy_client", sub_id="SUBID-123", vpn_key="vless://legacy@example.com:443#legacy",
+        sub_url=None, expires_at=utcnow() + timedelta(days=10), devices=2, traffic_gb=0, enabled=True,
+    )
+    saved_panel = panels_mod._panel
+    panels_mod._panel = StubXuiPanel(legacy)  # type: ignore[attr-defined]
+    try:
+        token = claim_token("SUBID-123", "selftest-secret")
+        link = build_claim_link("dfvpn_test_bot", "SUBID-123", "selftest-secret")
+        check("ссылка привязки ведёт на бота и подписана",
+              link.startswith("https://t.me/dfvpn_test_bot?start=claim_")
+              and not token_expired(link.rsplit("claim_", 1)[1]))
+        exp_custom, _sig = parse_token(claim_token("SUBID-123", "selftest-secret", ttl=3600))
+        check("токен: срок задаётся ttl", abs(exp_custom - (int(time.time()) + 3600)) <= 5, str(exp_custom))
+        tok = claim_token("SUBID-123", "selftest-secret")
+        check("токен: только Telegram-допустимые символы (A-Za-z0-9_-)",
+              all(c.isalnum() or c in "_-" for c in tok), tok)
+
+        await db.ensure_user(6001, "claim1", "Клейм1")
+        res = await bind_claim(bot, cfg_claim, db, 6001, token)
+        check("привязка: успешно", res.ok, res.message)
+        bound = await db.active_subscription(6001)
+        check("привязка: подписка создана по клиенту панели",
+              bound is not None and bound["panel_username"] == "legacy_client", str(bound and bound["panel_username"]))
+        check("привязка: срок взят из панели",
+              bound is not None and 9 <= (from_iso(bound["expires_at"]) - utcnow()).days <= 10)
+        check("привязка: карточка отправлена", "VPN готов" in bot.all_text_for(6001))
+
+        res_again = await bind_claim(bot, cfg_claim, db, 6001, token)
+        count = int(await db.scalar("SELECT COUNT(*) FROM subscriptions WHERE panel_username = 'legacy_client'"))
+        check("привязка: повтор тем же юзером идемпотентен", res_again.ok and count == 1, str(count))
+
+        await db.ensure_user(6002, "claim2", "Клейм2")
+        res_foreign = await bind_claim(bot, cfg_claim, db, 6002, token)
+        check("привязка: чужой claim отклонён", not res_foreign.ok, res_foreign.message)
+
+        res_bad = await bind_claim(bot, cfg_claim, db, 6003, "deadbeef")
+        check("привязка: неизвестный токен отклонён", not res_bad.ok)
+
+        res_off = await bind_claim(bot, dataclasses.replace(cfg_claim, claim_enabled=False), db, 6003, token)
+        check("привязка: feature выключена — отказ", not res_off.ok)
+
+        no_expiry = ClaimedClient(email="no_exp", sub_id="SUBID-NOEXP", vpn_key="vless://x",
+                                  sub_url=None, expires_at=None, devices=1, traffic_gb=0, enabled=True)
+        panels_mod._panel = StubXuiPanel(no_expiry)  # type: ignore[attr-defined]
+        res_noexp = await bind_claim(bot, cfg_claim, db, 6003, claim_token("SUBID-NOEXP", "selftest-secret"))
+        check("привязка: клиент без срока отклонён", not res_noexp.ok)
+
+        second = ClaimedClient(email="legacy_client_2", sub_id="SUBID-456", vpn_key="vless://y",
+                               sub_url=None, expires_at=utcnow() + timedelta(days=5), devices=1,
+                               traffic_gb=0, enabled=True)
+        panels_mod._panel = StubXuiPanel(second)  # type: ignore[attr-defined]
+        res_second = await bind_claim(bot, cfg_claim, db, 6001, claim_token("SUBID-456", "selftest-secret"))
+        check("привязка: вторая активная подписка запрещена", not res_second.ok, res_second.message)
+
+        await db.ensure_user(6004, "claim4", "Клейм4")
+        expired = claim_token("SUBID-123", "selftest-secret", ttl=-1)
+        check("токен: истёкший помечается", token_expired(expired))
+        res_expired = await bind_claim(bot, cfg_claim, db, 6004, expired)
+        check("привязка: истёкшая ссылка отклонена", not res_expired.ok and "истёк" in res_expired.message,
+              res_expired.message)
+
+        await db.ensure_user(6005, "claim5", "Клейм5")
+        disabled = ClaimedClient(email="disabled_client", sub_id="SUBID-DIS", vpn_key="vless://dis",
+                                 sub_url=None, expires_at=utcnow() + timedelta(days=15), devices=1,
+                                 traffic_gb=0, enabled=False)
+        panels_mod._panel = StubXuiPanel(disabled)  # type: ignore[attr-defined]
+        res_disabled = await bind_claim(bot, cfg_claim, db, 6005, claim_token("SUBID-DIS", "selftest-secret"))
+        check("привязка: отключённый клиент отклонён", not res_disabled.ok and "отключ" in res_disabled.message,
+              res_disabled.message)
+
+        await db.ensure_user(7001, "race1", "Рейс1")
+        await db.ensure_user(7002, "race2", "Рейс2")
+        race_client = ClaimedClient(email="race_client", sub_id="SUBID-RACE", vpn_key="vless://race",
+                                    sub_url=None, expires_at=utcnow() + timedelta(days=8), devices=1,
+                                    traffic_gb=0, enabled=True)
+        panels_mod._panel = StubXuiPanel(race_client)  # type: ignore[attr-defined]
+        race_token = claim_token("SUBID-RACE", "selftest-secret")
+        race = await asyncio.gather(
+            bind_claim(bot, cfg_claim, db, 7001, race_token),
+            bind_claim(bot, cfg_claim, db, 7002, race_token),
+        )
+        race_ok = sum(1 for r in race if r.ok)
+        race_rows = int(await db.scalar("SELECT COUNT(*) FROM subscriptions WHERE panel_username = 'race_client'"))
+        check("привязка: конкурентные claim создают ровно одну подписку",
+              race_ok == 1 and race_rows == 1, f"ok={race_ok}, rows={race_rows}")
+    finally:
+        panels_mod._panel = saved_panel  # type: ignore[attr-defined]
+
+    await db.close()
+    print(f"\n{'=' * 60}\nИТОГО: {len(PASSED)} успешно, {len(FAILED)} ошибок")
+    if FAILED:
+        for item in FAILED:
+            print(f"  • {item}")
+        sys.exit(1)
+    print("Все проверки пройдены ✅")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run())
+    finally:
+        # aiosqlite держит поток на каждое соединение: закрываемся явно
+        import gc
+
+        gc.collect()
