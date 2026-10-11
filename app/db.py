@@ -149,10 +149,10 @@ CREATE TABLE IF NOT EXISTS settings (
 
 DEFAULT_PLANS: Sequence[tuple[str, str, int, int, int, int, int]] = (
     # code, title, price, days, traffic_gb, devices, sort_order
-    ("1m", "🔥 1 месяц", 150, 30, 0, 2, 10),
-    ("3m", "⭐ 3 месяца", 405, 90, 0, 3, 20),
-    ("6m", "💎 6 месяцев", 765, 180, 0, 5, 30),
-    ("12m", "👑 12 месяцев", 1350, 365, 0, 5, 40),
+    ("2devic", "🔥 1 месяц", 100, 30, 0, 2, 10),
+    ("3devic", "⭐ 1 месяц", 150, 30, 0, 3, 20),
+    ("4devic", "💎 1 месяц", 200, 30, 0, 4, 30),
+    ("5devic", "👑 1 месяц", 250, 30, 0, 5, 40),
 )
 
 
