@@ -25,7 +25,7 @@ systemctl restart dfvpnbot
 ## 🐳 Установка через Docker
 
 ```bash
-git clone https://github.com/Dolov07KBR/DF-VPN-Bot.git && cd DF-VPN-Bot
+git clone https://github.com/zymzymgl-del/testbot.git && cd testbot
 cp .env.example .env && nano .env      # заполните BOT_TOKEN, ADMIN_IDS и остальное
 docker compose up -d --build
 docker compose logs -f
@@ -34,7 +34,7 @@ docker compose logs -f
 ## 🛠 Ручная установка
 
 ```bash
-git clone https://github.com/Dolov07KBR/DF-VPN-Bot.git && cd DF-VPN-Bot
+git clone https://github.com/zymzymgl-del/testbot.git && cd testbot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env && nano .env       # токен, админы, оплата, панель
 .venv/bin/python bot.py
