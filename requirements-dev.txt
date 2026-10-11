@@ -1,0 +1,14 @@
+# Инструменты разработки (НЕ нужны для работы бота).
+#
+# Установка:  python -m pip install -r requirements-dev.txt
+#
+# Включает рантайм-зависимости и утилиты для локальной разработки.
+-r requirements.txt
+
+# Линтер/форматтер.
+ruff>=0.6.0
+
+# Прогон тестов инструментами pytest (сами тесты лежат в tools/ и запускаются
+# и напрямую: `python tools/selftest.py`, `python tools/integration_test.py`).
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

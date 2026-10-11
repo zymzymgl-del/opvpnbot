@@ -22,9 +22,11 @@ app/services/panels.py     — выдача ключей: BasePanel → PoolPane
 app/services/payments.py   — YooKassaClient, YooMoneyClient, звёзды (send_invoice/refund)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
-tools/selftest.py          — 63 проверки логики без сети
+tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
 tools/integration_test.py  — маршрутизация апдейтов через Dispatcher.feed_update
-install.sh / deploy/       — установка на VPS (systemd dfvpnbot) и Docker
+install.sh / deploy/       — установка на VPS: systemd-служба dfvpnbot (install.sh --update/--uninstall/--no-service)
+Dockerfile / docker-compose.yml — контейнерный запуск (непривилегированный пользователь, том под data/)
+requirements-dev.txt       — инструменты разработки (ruff, pytest)
 ```
 
 Правило зависимостей: `handlers → services → db/config/utils`; сервисы не импортируют handlers; `config`/`db` не импортируют ничего выше себя. Единственный цикл, допустимый исторически: `middlewares → services.subs` (для `notify_admins`).

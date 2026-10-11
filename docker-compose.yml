@@ -1,0 +1,35 @@
+# DF VPN Bot — docker compose.
+#
+#   cp .env.example .env && nano .env     # заполните BOT_TOKEN, ADMIN_IDS и остальное
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Данные (SQLite, логи, бэкапы) хранятся в именованном томе dfvpn-data,
+# поэтому переживают пересоздание контейнера.
+services:
+  dfvpnbot:
+    build: .
+    image: df-vpn-bot:latest
+    container_name: dfvpnbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Внутри контейнера данные всегда в /app/data (точка монтирования тома).
+      DB_PATH: /app/data/dfvpnbot.sqlite3
+      LOG_FILE: /app/data/bot.log
+    volumes:
+      - dfvpn-data:/app/data
+    # Если включены вебхуки ЮKassa и порт должен быть доступен снаружи — раскомментируйте:
+    # ports:
+    #   - "8080:8080"
+
+volumes:
+  dfvpn-data:
+
+# Альтернатива именованному тому — каталог рядом с compose-файлом.
+# ВНИМАНИЕ: владельцем каталога должен быть UID контейнера (10001), иначе бот
+# не сможет писать в базу. Подготовьте заранее:  sudo mkdir -p data && sudo chown -R 10001:10001 data
+#
+#    volumes:
+#      - ./data:/app/data

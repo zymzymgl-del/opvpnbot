@@ -43,9 +43,11 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 Проверить, что всё собрано корректно, можно без Telegram:
 
 ```bash
-.venv/bin/python tools/selftest.py          # 40 проверок логики
+.venv/bin/python tools/selftest.py          # проверки логики без сети (100+)
 .venv/bin/python tools/integration_test.py  # прогон апдейтов через диспетчер
 ```
+
+> На Windows вывод с эмодзи может ломаться в cp1251 — запускайте с `PYTHONIOENCODING=utf-8`.
 
 ---
 
@@ -163,6 +165,10 @@ app/webhook.py             HTTP-сервер уведомлений ЮKassa
 tools/selftest.py          автотест логики без сети
 tools/integration_test.py  тест маршрутизации апдейтов через диспетчер
 install.sh                 установщик на VPS одной командой
+Dockerfile                 образ для Docker
+docker-compose.yml         запуск бота в контейнере (том для data/)
+requirements-dev.txt       инструменты разработки (не обязательны)
+.env.example               образец конфигурации → копируется в .env
 deploy/dfvpnbot.service    образец systemd-юнита
 docs/                      инструкции по панелям и оплате
 ```
