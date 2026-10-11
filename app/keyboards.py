@@ -7,8 +7,6 @@ from typing import Iterable, Sequence
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -24,18 +22,23 @@ BTN_TRIAL = "🎁 Пробный период"
 BTN_HELP = "ℹ️ Помощь"
 BTN_ADMIN = "⚙️ Админка"
 
+MAIN_MENU_TEXT = "🏠 <b>Главное меню</b>\n\nВыберите раздел:"
 
-def main_menu(is_admin: bool = False, trial_enabled: bool = False) -> ReplyKeyboardMarkup:
-    rows: list[list[KeyboardButton]] = [
-        [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_MY_KEYS)],
-        [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_SUPPORT)],
-    ]
+
+def main_menu(is_admin: bool = False, trial_enabled: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню — полностью на инлайн-кнопках (callback_data)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=BTN_BUY, callback_data="menu:buy")
+    builder.button(text=BTN_MY_KEYS, callback_data="menu:keys")
+    builder.button(text=BTN_PROFILE, callback_data="menu:profile")
+    builder.button(text=BTN_SUPPORT, callback_data="menu:support")
     if trial_enabled:
-        rows.append([KeyboardButton(text=BTN_TRIAL)])
+        builder.button(text=BTN_TRIAL, callback_data="menu:trial")
+    builder.button(text=BTN_HELP, callback_data="menu:help")
     if is_admin:
-        rows.append([KeyboardButton(text=BTN_ADMIN)])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True,
-                               input_field_placeholder="Купить · ключи · профиль · поддержка")
+        builder.button(text=BTN_ADMIN, callback_data="adm:panel")
+    builder.adjust(2)
+    return builder.as_markup()
 
 
 def cancel_kb(callback: str = "menu:main") -> InlineKeyboardMarkup:
@@ -117,6 +120,7 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
     if support_username:
         builder.button(text="🆘 Не работает", url=f"https://t.me/{support_username}")
+    builder.button(text="◀️ К подпискам", callback_data="menu:keys")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -219,7 +223,8 @@ def admin_kb(stats: dict, tickets_open: int = 0) -> InlineKeyboardMarkup:
             text = f"{text} ({badge})"
         builder.button(text=text, callback_data=data)
     builder.button(text="ℹ️ О боте", callback_data="adm:about")
-    builder.adjust(2, 2, 2, 2, 2, 2)
+    builder.button(text="🏠 В меню", callback_data="menu:main")
+    builder.adjust(2)
     return builder.as_markup()
 
 

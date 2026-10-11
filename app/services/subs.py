@@ -13,7 +13,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.config import Config
 from app.db import Database, from_iso, to_iso, utcnow
-from app.keyboards import main_menu, subscription_kb
+from app.keyboards import subscription_kb
 from app.services.panels import PanelError, get_panel
 from app.runtime import runtime as rt
 from app.services.payments import YooKassaClient
@@ -64,8 +64,15 @@ def renewal_available(existing, cfg: Config) -> bool:
     return left <= timedelta(days=window)
 
 
-async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: int, sub_row) -> None:
-    """Отправляет пользователю сообщение с конфигом, QR и инструкцией."""
+async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: int, sub_row,
+                                 *, with_qr: bool = False) -> None:
+    """Отправляет пользователю карточку подписки (конфиг + кнопки QR/инструкции).
+
+    ``with_qr=True`` дополнительно отправляет QR-код отдельным сообщением —
+    нужно только в сценарии привязки клиента панели (claims), где QR был в ссылке,
+    которую пользователь отсканировал. При обычной выдаче/продлении QR не шлём:
+    он доступен кнопкой «📷 QR-код».
+    """
     sub_url = sub_row["sub_url"] if "sub_url" in sub_row.keys() else None
     link = sub_url or (sub_row["vpn_key"] or "")
     text = (
@@ -75,24 +82,24 @@ async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: i
         f"(осталось {human_left(sub_row['expires_at'])})\n"
         f"Устройств: <b>{sub_row['devices']}</b>, трафик: <b>"
         f"{'безлимит' if not sub_row['traffic_gb'] else str(sub_row['traffic_gb']) + ' ГБ'}</b>\n\n"
-        f"🔗 <b>Ваш конфиг:</b>\n<code>{esc(link)}</code>\n\n"
         "Нажмите кнопку ниже, чтобы получить QR-код и инструкцию по подключению."
     )
     markup = subscription_kb(sub_row["id"], sub_url, sub_row["vpn_key"] or "", cfg.support_username)
     await safe_send(bot, user_id, text, markup)
 
-    qr = make_qr_png(link) if link else None
-    if qr:
-        try:
-            from aiogram.types import BufferedInputFile
+    if with_qr and link:
+        qr = make_qr_png(link)
+        if qr:
+            try:
+                from aiogram.types import BufferedInputFile
 
-            await bot.send_photo(
-                user_id,
-                BufferedInputFile(qr, filename="vpn-qr.png"),
-                caption="📷 QR-код вашей конфигурации — отсканируйте в приложении VPN.",
-            )
-        except Exception as exc:  # pragma: no cover
-            log.info("QR не отправлен: %s", exc)
+                await bot.send_photo(
+                    user_id,
+                    BufferedInputFile(qr, filename="vpn-qr.png"),
+                    caption="📷 QR-код вашей конфигурации — отсканируйте в приложении VPN.",
+                )
+            except Exception as exc:  # pragma: no cover
+                log.info("QR не отправлен: %s", exc)
 
 
 async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, plan_code: str,
@@ -170,11 +177,18 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
             if notify:
                 traffic_label = "безлимит" if not merged_traffic else f"{merged_traffic} ГБ"
                 header = "Подписка возобновлена" if reactivating else "Подписка продлена"
+                from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
                 await safe_send(
                     bot, user_id,
                     f"✅ <b>{header} до {fmt_dt(new_expires)}</b> (+{days} дн.)\n"
                     f"Тариф: <b>{esc(shown_plan)}</b> · устройств: <b>{new_devices}</b> · трафик: <b>{traffic_label}</b>\n\n"
                     "Приятного пользования!",
+                    InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔑 Моя подписка",
+                                              callback_data=f"sub:view:{reuse['id']}")],
+                        [InlineKeyboardButton(text="🏠 В меню", callback_data="menu:main")],
+                    ]),
                 )
             if not quiet_admin:
                 action = "Возобновление подписки" if reactivating else "Продление подписки"
@@ -201,8 +215,8 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
     )
     row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
     if notify:
+        # Только карточка подписки: QR — по кнопке, главное меню — по кнопке «◀️ К подпискам».
         await send_subscription_card(bot, cfg, db, user_id, row)
-        await safe_send(bot, user_id, "Главное меню 👇", main_menu(cfg.is_admin(user_id), rt.trial_enabled))
     if not quiet_admin:
         await notify_admins(
             bot, cfg,

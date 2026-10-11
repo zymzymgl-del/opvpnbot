@@ -78,9 +78,11 @@ class FakeBot:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str]] = []
         self.photos: list[int] = []
+        self.markups: list[tuple[int, object]] = []
 
     async def send_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=None, **kw):
         self.messages.append((int(chat_id), text))
+        self.markups.append((int(chat_id), reply_markup))
         return None
 
     async def send_photo(self, chat_id, photo=None, caption=None, **kw):
@@ -101,6 +103,12 @@ class FakeBot:
 
     def all_text_for(self, chat_id: int) -> str:
         return "\n".join(text for cid, text in self.messages if cid == chat_id)
+
+    def last_markup_for(self, chat_id: int):
+        for cid, markup in reversed(self.markups):
+            if cid == chat_id:
+                return markup
+        return None
 
 
 async def run() -> None:
@@ -124,11 +132,16 @@ async def run() -> None:
     check("ключ взят из пула", "vless://test-key" in (sub["vpn_key"] or ""), sub["vpn_key"] or "")
     check("срок = 30 дней", 29 <= (from_iso(sub["expires_at"]) - utcnow()).days + 1 <= 30)
     check("пользователю отправлена карточка", "VPN готов" in bot.all_text_for(1001))
-    check("QR отправлен", 1001 in bot.photos)
+    check("QR отдельным сообщением не отправляется", 1001 not in bot.photos)
 
     extended = await grant_subscription(bot, cfg, db, 1001, "1m")
     delta_days = (from_iso(extended["expires_at"]) - from_iso(sub["expires_at"])).days
     check("продление сдвинуло срок на 30 дней", delta_days == 30, str(delta_days))
+    renew_markup = bot.last_markup_for(1001)
+    renew_buttons = ({b.text for row in renew_markup.inline_keyboard for b in row}
+                     if renew_markup is not None else set())
+    check("продление: есть кнопки «Моя подписка» и «В меню»",
+          {"🔑 Моя подписка", "🏠 В меню"} <= renew_buttons, str(renew_buttons))
     check("ключ при продлении не изменился", extended["vpn_key"] == sub["vpn_key"])
     check("в пуле осталось 2 свободных ключа", (await db.pool_stats())["free"] == 2)
 
@@ -569,6 +582,7 @@ async def run() -> None:
         check("привязка: срок взят из панели",
               bound is not None and 9 <= (from_iso(bound["expires_at"]) - utcnow()).days <= 10)
         check("привязка: карточка отправлена", "VPN готов" in bot.all_text_for(6001))
+        check("привязка: QR отправлен", 6001 in bot.photos)
 
         res_again = await bind_claim(bot, cfg_claim, db, 6001, token)
         count = int(await db.scalar("SELECT COUNT(*) FROM subscriptions WHERE panel_username = 'legacy_client'"))

@@ -133,7 +133,7 @@ async def bind_claim(bot: Bot, cfg: Config, db: Database, user_id: int, token: s
     if existing is not None:
         if int(existing["user_id"]) == user_id:
             row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(existing["id"]),))
-            await send_subscription_card(bot, cfg, db, user_id, row)
+            await send_subscription_card(bot, cfg, db, user_id, row, with_qr=True)
             return ClaimResult(True, "Эта подписка уже привязана к вам 👇", row)
         return ClaimResult(False, "Эта подписка уже привязана к другому аккаунту.")
 
@@ -157,12 +157,12 @@ async def bind_claim(bot: Bot, cfg: Config, db: Database, user_id: int, token: s
         existing = await db.subscription_by_panel_username("xui", client.email)
         if existing is not None and int(existing["user_id"]) == user_id:
             row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(existing["id"]),))
-            await send_subscription_card(bot, cfg, db, user_id, row)
+            await send_subscription_card(bot, cfg, db, user_id, row, with_qr=True)
             return ClaimResult(True, "Эта подписка уже привязана к вам 👇", row)
         return ClaimResult(False, "Эта подписка уже привязана к другому аккаунту.")
 
     row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
-    await send_subscription_card(bot, cfg, db, user_id, row)
+    await send_subscription_card(bot, cfg, db, user_id, row, with_qr=True)
     await notify_admins(
         bot, cfg,
         f"🔗 <b>Клиент панели привязан</b>\n"

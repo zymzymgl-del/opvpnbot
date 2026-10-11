@@ -22,7 +22,6 @@ from app import __author__, __author_url__, __version__
 from app.config import Config
 from app.db import Database, to_iso, utcnow
 from app.keyboards import (
-    BTN_ADMIN,
     admin_keys_kb,
     admin_kb,
     admin_order_kb,
@@ -100,7 +99,6 @@ async def _panel_text(db: Database, cfg: Config) -> str:
 
 
 @router.message(Command("admin"))
-@router.message(F.text == BTN_ADMIN)
 async def cmd_admin(message: Message, db: Database, cfg: Config) -> None:
     stats = await db.stats()
     await message.answer(await _panel_text(db, cfg), reply_markup=admin_kb(stats, stats["tickets_open"]))

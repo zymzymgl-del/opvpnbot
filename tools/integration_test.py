@@ -60,7 +60,17 @@ def install_stubs(bot: Bot) -> None:
     async def fake_call(self, method, request_timeout=None):
         name = type(method).__name__
         if name == "SendMessage":
-            OUT.append(("message", getattr(method, "text", "") or ""))
+            text = getattr(method, "text", "") or ""
+            if text != "\u2063":  # служебное сообщение для снятия reply-клавиатуры
+                OUT.append(("message", text))
+            sent = Message.model_construct(
+                message_id=abs(hash(text)) % 100000 + 1,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=getattr(method, "chat_id", 0), type="private"),
+                from_user=User(id=1, is_bot=True, first_name="TestBot"),
+                text=text, html_text="", entities=[],
+            )
+            return sent.as_(self)
         elif name == "SendPhoto":
             OUT.append(("photo", getattr(method, "caption", "") or ""))
         elif name == "SendDocument":
@@ -165,7 +175,7 @@ async def run() -> None:
 
     # пополнение баланса и оплата с баланса
     OUT.clear()
-    await dp.feed_update(bot, make_message(555, "👤 Профиль"))
+    await dp.feed_update(bot, make_callback(555, "menu:profile", 16))
     expect("профиль показан", "Профиль" in sent("message"))
     await db.add_balance(555, 1000, method="admin", kind="adjust", note="test")
 
@@ -192,7 +202,7 @@ async def run() -> None:
     await db.update_subscription(sub["id"], expires_at=to_iso(utcnow() + timedelta(days=2)))
 
     OUT.clear()
-    await dp.feed_update(bot, make_message(555, "🔑 Мои ключи"))
+    await dp.feed_update(bot, make_callback(555, "menu:keys", 18))
     expect("список ключей показан", "Мои подписки" in sent("message"), sent("message")[:80])
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, f"sub:view:{sub['id']}", 7))
@@ -258,15 +268,19 @@ async def run() -> None:
 
     print("\n4. Прочее")
     OUT.clear()
-    await dp.feed_update(bot, make_message(555, "🆘 Поддержка"))
+    await dp.feed_update(bot, make_callback(555, "menu:support", 24))
     expect("раздел поддержки открыт", "Поддержка" in sent("message"))
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "support:faq", 16))
     expect("FAQ показан", "Частые вопросы" in sent("message"))
+    OUT.clear()
+    await dp.feed_update(bot, make_message(555, "🛒 Купить VPN", 27))
+    expect("старая reply-кнопка открывает инлайн-меню",
+           "Главное меню" in sent("message"), sent("message")[:80])
     print("\n4a. Реферальная программа включена")
     object.__setattr__(cfg, "ref_enabled", True)
     OUT.clear()
-    await dp.feed_update(bot, make_message(555, "🤝 Пригласить друга", 17))
+    await dp.feed_update(bot, make_callback(555, "ref:open", 25))
     expect("реферальный раздел показан", "Приглашайте друзей" in sent("message"))
     expect("в ссылке есть ref-метка", "start=ref_555" in sent("message"), sent("message")[-200:])
 
@@ -281,10 +295,11 @@ async def run() -> None:
     object.__setattr__(cfg, "ref_enabled", False)
     try:
         OUT.clear()
-        await dp.feed_update(bot, make_message(555, "🤝 Пригласить друга", 19))
+        CALLBACK_ANSWERS.clear()
+        await dp.feed_update(bot, make_callback(555, "ref:open", 26))
         expect("раздел не показывается при отключении",
-               "Приглашайте друзей" not in sent("message") and "отключена" in sent("message"),
-               sent("message")[:80])
+               "Приглашайте друзей" not in sent("message") and "отключена" in " ".join(CALLBACK_ANSWERS),
+               (sent("message")[:80] + " | " + " ".join(CALLBACK_ANSWERS)))
         OUT.clear()
         CALLBACK_ANSWERS.clear()
         await dp.feed_update(bot, make_callback(555, "ref:open", 20))

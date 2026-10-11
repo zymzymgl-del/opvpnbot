@@ -14,13 +14,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.config import Config
 from app.db import Database, from_iso
 from app.keyboards import (
+    BTN_ADMIN,
     BTN_BUY,
     BTN_HELP,
     BTN_MY_KEYS,
     BTN_PROFILE,
-    BTN_REF,
     BTN_SUPPORT,
     BTN_TRIAL,
+    MAIN_MENU_TEXT,
     back_kb,
     cancel_kb,
     checkout_kb,
@@ -78,6 +79,30 @@ def _methods_line(cfg: Config) -> str:
     return ", ".join(names) if names else "по согласованию с поддержкой"
 
 
+async def _edit_or_answer(
+    call: CallbackQuery,
+    text: str,
+    markup=None,
+) -> None:
+    """Правит текущее сообщение (режим одного окна), иначе шлёт новое."""
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except Exception as exc:  # noqa: BLE001 — ожидаемо для недоступных/старых сообщений
+        if "message can't be edited" not in str(exc).lower():
+            log.warning("Не удалось отредактировать меню: %s", exc)
+        await call.message.answer(text, reply_markup=markup)
+
+
+async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
+    await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
+
+
+async def _send_menu_window(message: Message, text: str, cfg: Config) -> None:
+    """Показывает окно меню с инлайн-кнопками (режим одного окна)."""
+    await message.answer(
+        text, reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+
+
 class PromoStates(StatesGroup):
     enter = State()
 
@@ -108,8 +133,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
 
         result = await bind_claim(bot, cfg, db, user.id, payload[len(CLAIM_PREFIX):])
         prefix = "🎉 " if result.ok else "⚠️ "
-        await message.answer(prefix + esc(result.message),
-                             reply_markup=main_menu(cfg.is_admin(user.id), rt.trial_enabled))
+        await _send_menu_window(message, prefix + esc(result.message), cfg)
         return
 
     row = await db.get_user(user.id)
@@ -149,19 +173,27 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     sub = await db.active_subscription(user.id)
     if sub is not None:
         greeting += f"\n🟢 Ваша подписка активна, осталось <b>{human_left(sub['expires_at'])}</b>."
-    await message.answer(greeting, reply_markup=main_menu(cfg.is_admin(user.id), rt.trial_enabled))
+    await _send_menu_window(message, greeting, cfg)
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, cfg: Config) -> None:
-    await message.answer("Главное меню 👇", reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+    await _send_menu_window(message, MAIN_MENU_TEXT, cfg)
+
+
+#: Тексты кнопок старой reply-клавиатуры — для бесшовного перехода пользователей.
+LEGACY_REPLY_TEXTS = {BTN_BUY, BTN_MY_KEYS, BTN_PROFILE, BTN_SUPPORT, BTN_TRIAL, BTN_HELP, BTN_ADMIN}
+
+
+@router.message(F.text.in_(LEGACY_REPLY_TEXTS))
+async def msg_legacy_reply_button(message: Message, cfg: Config) -> None:
+    """Нажатие кнопки со старой reply-клавиатуры: показываем новое инлайн-меню."""
+    await _send_menu_window(message, MAIN_MENU_TEXT, cfg)
 
 
 @router.callback_query(F.data == "menu:main")
 async def cb_main_menu(call: CallbackQuery, cfg: Config) -> None:
-    await call.message.edit_reply_markup(reply_markup=None)
-    await call.message.answer("Главное меню 👇",
-                              reply_markup=main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
+    await _show_main_menu(call, cfg)
     await call.answer()
 
 
@@ -183,9 +215,8 @@ async def cb_check_subscription(call: CallbackQuery, cfg: Config, bot: Bot) -> N
         if member.status not in {"creator", "administrator", "member", "restricted"}:
             await call.answer("Вы ещё не подписались на все каналы 🙂", show_alert=True)
             return
-    await call.message.edit_text("✅ Спасибо за подписку! Доступ открыт.")
-    await call.message.answer("Главное меню 👇", reply_markup=main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
-    await call.answer("Готово!")
+    await _show_main_menu(call, cfg)
+    await call.answer("Готово! ✅")
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +266,6 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
             await target.message.answer(text, reply_markup=markup)
     else:
         await target.answer(text, reply_markup=markup)
-
-
-@router.message(F.text == BTN_BUY)
-async def msg_plans(message: Message, db: Database, cfg: Config) -> None:
-    await _show_plans(message, db, cfg)
 
 
 @router.callback_query(F.data == "menu:buy")
@@ -588,14 +614,23 @@ async def on_successful_payment(message: Message, db: Database, cfg: Config, bot
 # ---------------------------------------------------------------------------
 # Мои ключи
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_MY_KEYS)
-async def msg_my_keys(message: Message, db: Database, cfg: Config) -> None:
-    subs = await db.user_subscriptions(message.from_user.id)
+@router.callback_query(F.data == "menu:keys")
+async def cb_keys(call: CallbackQuery, db: Database) -> None:
+    subs = await db.user_subscriptions(call.from_user.id)
     if not subs:
-        await message.answer("У вас пока нет подписок 🙂", reply_markup=back_kb("menu:buy", "🛒 Купить VPN"))
+        await _edit_or_answer(
+            call,
+            "У вас пока нет подписок 🙂",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 Купить VPN", callback_data="menu:buy")],
+                [InlineKeyboardButton(text="◀️ В меню", callback_data="menu:main")],
+            ]),
+        )
+        await call.answer()
         return
     text = "🔑 <b>Мои подписки</b>\n\nВыберите подписку, чтобы посмотреть конфиг, QR-код и инструкцию."
-    await message.answer(text, reply_markup=keys_kb(subs))
+    await _edit_or_answer(call, text, keys_kb(subs))
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("sub:view:"))
@@ -662,7 +697,8 @@ async def cb_sub_howto(call: CallbackQuery, db: Database) -> None:
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
         return
-    await call.message.answer(apps_instructions(sub["vpn_key"] or "", sub["sub_url"], int(sub["devices"])))
+    await _edit_or_answer(call, apps_instructions(sub["vpn_key"] or "", sub["sub_url"], int(sub["devices"])),
+                          back_kb(f"sub:view:{sub_id}", "◀️ К подписке"))
     await call.answer()
 
 
@@ -675,46 +711,50 @@ async def cb_sub_renew(call: CallbackQuery, db: Database, cfg: Config) -> None:
 # ---------------------------------------------------------------------------
 # Пробный период
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_TRIAL)
-async def msg_trial(message: Message, db: Database, cfg: Config, bot: Bot) -> None:
+@router.callback_query(F.data == "menu:trial")
+async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
     if not rt.trial_enabled:
-        await message.answer("Пробный период сейчас недоступен.")
+        await call.answer("Пробный период сейчас недоступен.", show_alert=True)
         return
-    user = await db.get_user(message.from_user.id)
+    user = await db.get_user(call.from_user.id)
     if user is not None and user["trial_used"]:
-        await message.answer("🎁 Пробный период уже был использован — доступен только платный тариф.",
-                             reply_markup=back_kb("menu:buy", "🛒 Купить VPN"))
+        await _edit_or_answer(call, "🎁 Пробный период уже был использован — доступен только платный тариф.",
+                              back_kb("menu:buy", "🛒 Купить VPN"))
+        await call.answer()
         return
-    active = await db.active_subscription(message.from_user.id)
+    active = await db.active_subscription(call.from_user.id)
     if active is not None:
-        await message.answer("У вас уже есть активная подписка 🙂", reply_markup=back_kb("menu:main"))
+        await _edit_or_answer(call, "У вас уже есть активная подписка 🙂", back_kb("menu:main"))
+        await call.answer()
         return
     try:
-        await grant_subscription(bot, cfg, db, message.from_user.id, "trial")
+        await grant_subscription(bot, cfg, db, call.from_user.id, "trial")
     except PanelError as exc:
-        await message.answer(f"⚠️ Не удалось выдать пробный доступ: {esc(exc)}\nНапишите в поддержку.",
-                             reply_markup=back_kb("menu:support", "🆘 Поддержка"))
-        await notify_admins(bot, cfg, f"⚠️ Пробный доступ не выдан <code>{message.from_user.id}</code>: {esc(exc)}")
+        await _edit_or_answer(call, f"⚠️ Не удалось выдать пробный доступ: {esc(exc)}\nНапишите в поддержку.",
+                              back_kb("menu:support", "🆘 Поддержка"))
+        await notify_admins(bot, cfg, f"⚠️ Пробный доступ не выдан <code>{call.from_user.id}</code>: {esc(exc)}")
+        await call.answer()
         return
-    await db.set_user_field(message.from_user.id, "trial_used", 1)
-    await notify_admins(bot, cfg, f"🎁 Пробный период выдан <code>{message.from_user.id}</code>")
+    await db.set_user_field(call.from_user.id, "trial_used", 1)
+    await notify_admins(bot, cfg, f"🎁 Пробный период выдан <code>{call.from_user.id}</code>")
+    await call.answer("Пробный период выдан 🎁")
 
 
 # ---------------------------------------------------------------------------
 # Профиль и баланс
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_PROFILE)
-async def msg_profile(message: Message, db: Database, cfg: Config) -> None:
-    user = await db.get_user(message.from_user.id)
-    sub = await db.active_subscription(message.from_user.id)
-    orders = await db.user_orders(message.from_user.id, limit=100)
+async def _profile_text(db: Database, cfg: Config, user_id: int) -> str:
+    user = await db.get_user(user_id)
+    sub = await db.active_subscription(user_id)
+    orders = await db.user_orders(user_id, limit=100)
     paid = sum(1 for o in orders if o["status"] == "paid")
+    balance = int(user["balance"]) if user and user["balance"] is not None else 0
     text = (
         "👤 <b>Профиль</b>\n\n"
-        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
     )
     if cfg.balance_enabled:
-        text += f"💰 Баланс: <b>{price(int(user['balance']) if user else 0, cfg.currency)}</b>\n"
+        text += f"💰 Баланс: <b>{price(balance, cfg.currency)}</b>\n"
     text += f"🛒 Покупок: <b>{paid}</b>\n"
     if sub is not None:
         text += (
@@ -725,27 +765,13 @@ async def msg_profile(message: Message, db: Database, cfg: Config) -> None:
         text += "\n🔴 Активной подписки нет.\n"
     if user is not None and int(user["ref_earned"] or 0) > 0:
         text += f"\n🤝 Заработано на рефералах: <b>{price(int(user['ref_earned']), cfg.currency)}</b>"
-    await message.answer(text, reply_markup=profile_kb(cfg.balance_enabled, cfg.referral_active))
+    return text
 
 
 @router.callback_query(F.data == "menu:profile")
 async def cb_profile(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    user = await db.get_user(call.from_user.id)
-    sub = await db.active_subscription(call.from_user.id)
-    text = (
-        "👤 <b>Профиль</b>\n\n"
-        f"🆔 ID: <code>{call.from_user.id}</code>\n"
-    )
-    if cfg.balance_enabled:
-        text += f"💰 Баланс: <b>{price(int(user['balance']) if user else 0, cfg.currency)}</b>\n"
-    if sub is not None:
-        text += f"\n🟢 Подписка активна, осталось {human_left(sub['expires_at'])}"
-    else:
-        text += "\n🔴 Активной подписки нет."
-    try:
-        await call.message.edit_text(text, reply_markup=profile_kb(cfg.balance_enabled, cfg.referral_active))
-    except Exception:
-        await call.message.answer(text, reply_markup=profile_kb(cfg.balance_enabled, cfg.referral_active))
+    text = await _profile_text(db, cfg, call.from_user.id)
+    await _edit_or_answer(call, text, profile_kb(cfg.balance_enabled, cfg.referral_active))
     await call.answer()
 
 
@@ -837,14 +863,10 @@ async def _create_topup(target: Message, db: Database, cfg: Config, amount: int,
 # ---------------------------------------------------------------------------
 # Реферальная программа
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_REF)
-async def msg_ref(message: Message, db: Database, cfg: Config, bot: Bot, bot_username: str = "") -> None:
-    if not cfg.referral_active:
-        await message.answer("Реферальная программа сейчас отключена.", reply_markup=back_kb())
-        return
-    user = await db.get_user(message.from_user.id)
-    invited = await db.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (message.from_user.id,))
-    link = f"https://t.me/{bot_username}?start=ref_{message.from_user.id}" if bot_username else "ссылка недоступна"
+async def _ref_text(db: Database, cfg: Config, user_id: int, bot_username: str) -> tuple[str, str]:
+    user = await db.get_user(user_id)
+    invited = await db.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}" if bot_username else "ссылка недоступна"
     earned = int(user["ref_earned"]) if user else 0
     text = (
         "🤝 <b>Приглашайте друзей и зарабатывайте</b>\n\n"
@@ -854,27 +876,16 @@ async def msg_ref(message: Message, db: Database, cfg: Config, bot: Bot, bot_use
         f"💰 Заработано: <b>{price(earned, cfg.currency)}</b>\n\n"
         f"🔗 Ваша ссылка:\n<code>{link}</code>"
     )
-    await message.answer(text, reply_markup=referral_kb(link, bot_username, rt.ref_percent))
+    return text, link
 
 
 @router.callback_query(F.data == "ref:open")
-async def cb_ref_open(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, bot_username: str = "") -> None:
+async def cb_ref_open(call: CallbackQuery, db: Database, cfg: Config, bot_username: str = "") -> None:
     if not cfg.referral_active:
         await call.answer("Реферальная программа сейчас отключена.", show_alert=True)
         return
-    user = await db.get_user(call.from_user.id)
-    invited = await db.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (call.from_user.id,))
-    link = f"https://t.me/{bot_username}?start=ref_{call.from_user.id}" if bot_username else "ссылка недоступна"
-    earned = int(user["ref_earned"]) if user else 0
-    text = (
-        "🤝 <b>Приглашайте друзей и зарабатывайте</b>\n\n"
-        f"Вы получаете <b>{rt.ref_percent}%</b> от каждой покупки приглашённого — на баланс, "
-        "которым можно оплачивать свою подписку.\n\n"
-        f"👥 Приглашено: <b>{invited}</b>\n"
-        f"💰 Заработано: <b>{price(earned, cfg.currency)}</b>\n\n"
-        f"🔗 Ваша ссылка:\n<code>{link}</code>"
-    )
-    await call.message.answer(text, reply_markup=referral_kb(link, bot_username, rt.ref_percent))
+    text, link = await _ref_text(db, cfg, call.from_user.id, bot_username)
+    await _edit_or_answer(call, text, referral_kb(link, bot_username, rt.ref_percent))
     await call.answer()
 
 
@@ -908,9 +919,9 @@ async def cb_ref_stats(call: CallbackQuery, db: Database, cfg: Config) -> None:
 # ---------------------------------------------------------------------------
 # Поддержка
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_SUPPORT)
-async def msg_support(message: Message, db: Database, cfg: Config) -> None:
-    ticket = await db.open_ticket(message.from_user.id)
+@router.callback_query(F.data == "menu:support")
+async def cb_support(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    ticket = await db.open_ticket(call.from_user.id)
     text = (
         "🆘 <b>Поддержка</b>\n\n"
         "Опишите проблему — ответим в этом чате. Обычно отвечаем в течение пары часов.\n"
@@ -918,28 +929,13 @@ async def msg_support(message: Message, db: Database, cfg: Config) -> None:
     )
     if ticket is not None:
         text += f"\n\n💬 У вас есть открытое обращение #{ticket['id']}."
-    await message.answer(text, reply_markup=support_kb(ticket is not None, cfg.support_username))
-
-
-@router.callback_query(F.data == "menu:support")
-async def cb_support(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    ticket = await db.open_ticket(call.from_user.id)
-    text = (
-        "🆘 <b>Поддержка</b>\n\n"
-        "Опишите проблему — ответим в этом чате.\n"
-    )
-    if ticket is not None:
-        text += f"\n💬 Открытое обращение #{ticket['id']}."
-    try:
-        await call.message.edit_text(text, reply_markup=support_kb(ticket is not None, cfg.support_username))
-    except Exception:
-        await call.message.answer(text, reply_markup=support_kb(ticket is not None, cfg.support_username))
+    await _edit_or_answer(call, text, support_kb(ticket is not None, cfg.support_username))
     await call.answer()
 
 
 @router.callback_query(F.data == "support:faq")
 async def cb_faq(call: CallbackQuery) -> None:
-    await call.message.answer(FAQ_TEXT, reply_markup=back_kb("menu:support", "◀️ В поддержку"))
+    await _edit_or_answer(call, FAQ_TEXT, back_kb("menu:support", "◀️ В поддержку"))
     await call.answer()
 
 
@@ -1032,10 +1028,15 @@ async def cb_ticket_close(call: CallbackQuery, db: Database) -> None:
 # ---------------------------------------------------------------------------
 # Помощь и правовые документы
 # ---------------------------------------------------------------------------
-@router.message(F.text == BTN_HELP)
 @router.message(Command("help"))
 async def msg_help(message: Message, cfg: Config) -> None:
     await message.answer(FAQ_TEXT, reply_markup=back_kb("menu:main"))
+
+
+@router.callback_query(F.data == "menu:help")
+async def cb_help(call: CallbackQuery) -> None:
+    await _edit_or_answer(call, FAQ_TEXT, back_kb("menu:main"))
+    await call.answer()
 
 
 @router.message(Command("terms"))
