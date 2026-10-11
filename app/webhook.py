@@ -115,7 +115,7 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
         return web.Response(status=200, text="ok")
 
     async def handle_health(_: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "df-vpn-bot webhook"})
+        return web.json_response({"ok": True, "service": "opvpn webhook"})
 
     app = web.Application()
     app.router.add_post(cfg.webhook_path, handle_yookassa)

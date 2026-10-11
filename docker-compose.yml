@@ -1,4 +1,4 @@
-# DF VPN Bot — docker compose.
+# OPVPN — docker compose.
 #
 #   cp .env.example .env && nano .env     # заполните BOT_TOKEN, ADMIN_IDS и остальное
 #   docker compose up -d --build
@@ -9,7 +9,7 @@
 services:
   dfvpnbot:
     build: .
-    image: df-vpn-bot:latest
+    image: opvpn:latest
     container_name: dfvpnbot
     restart: unless-stopped
     env_file:

@@ -1,10 +1,11 @@
-"""DF VPN Bot — Telegram-бот для продажи VPN-подписок на aiogram 3.
+"""OPVPN — Telegram-бот для продажи VPN-подписок на aiogram 3.
 
-Автор и владелец проекта: @Dolov07KBR (https://github.com/Dolov07KBR).
-Исходники: https://github.com/Dolov07KBR/DF-VPN-Bot
+Исходники: https://github.com/zymzymgl-del/testbot
+Основа — DF VPN Bot (автор @Dolov07KBR, https://github.com/Dolov07KBR); см. LICENSE.
 """
 
 __version__ = "2.0.0"
+#: Автор базового проекта (DF VPN Bot); кредит сохранён по требованию лицензии MIT.
 __author__ = "Dolov07KBR"
 __author_url__ = "https://github.com/Dolov07KBR"
-__repo__ = "https://github.com/Dolov07KBR/DF-VPN-Bot"
+__repo__ = "https://github.com/zymzymgl-del/testbot"

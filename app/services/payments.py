@@ -132,6 +132,7 @@ class YooMoneyClient:
     def __init__(self, cfg: Config) -> None:
         self.wallet = cfg.yoomoney_wallet
         self.token = cfg.yoomoney_token
+        self.bot_name = cfg.bot_name
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -155,7 +156,7 @@ class YooMoneyClient:
         params = {
             "receiver": self.wallet,
             "quickpay-form": "shop",
-            "targets": f"Оплата заказа DF VPN #{order_id}",
+            "targets": f"Оплата заказа {self.bot_name} #{order_id}",
             "paymentType": "AC",
             "sum": f"{amount_rub:.2f}",
             "label": self.label_for(order_id),

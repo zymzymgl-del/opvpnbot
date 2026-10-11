@@ -1,5 +1,5 @@
-# DF VPN Bot — образ для запуска в Docker.
-# Сборка:  docker build -t df-vpn-bot .
+# OPVPN — образ для запуска в Docker.
+# Сборка:  docker build -t opvpn .
 # Запуск:  docker compose up -d --build
 FROM python:3.12-slim
 

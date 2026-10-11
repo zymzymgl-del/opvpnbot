@@ -3,7 +3,7 @@
 # 2) поправьте пути, если ставили не в /opt/df-vpn-bot
 # 3) systemctl daemon-reload && systemctl enable --now dfvpnbot
 [Unit]
-Description=DF VPN Bot (Telegram bot for VPN subscriptions)
+Description=OPVPN (Telegram bot for VPN subscriptions)
 After=network-online.target
 Wants=network-online.target
 

@@ -214,7 +214,7 @@ def load_config() -> Config:
         support_username=_str("SUPPORT_USERNAME", "@support").lstrip("@"),
         news_channel_url=_str("NEWS_CHANNEL_URL"),
         required_channels=_list("REQUIRED_CHANNELS"),
-        bot_name=_str("BOT_NAME", "DF VPN"),
+        bot_name=_str("BOT_NAME", "OPVPN"),
         currency=_str("CURRENCY", "₽"),
         trial_enabled=_bool("TRIAL_ENABLED", False),
         trial_days=_int("TRIAL_DAYS", 3),

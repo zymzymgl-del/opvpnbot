@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DF VPN Bot — точка входа.
+"""OPVPN — точка входа.
 
 Запуск:  python bot.py     (или systemd-сервис dfvpnbot, см. install.sh)
 
@@ -113,7 +113,7 @@ async def main() -> None:
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
-    log.info("Бот @%s (id=%s), версия %s, автор @%s (%s)", me.username, me.id, __version__, __author__, __author_url__)
+    log.info("Бот @%s (id=%s), версия %s; основа — DF VPN Bot (@%s, %s)", me.username, me.id, __version__, __author__, __author_url__)
 
     yk = YooKassaClient(cfg) if cfg.yookassa_enabled else None
     ym = YooMoneyClient(cfg) if cfg.yoomoney_enabled else None

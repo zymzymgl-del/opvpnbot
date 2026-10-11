@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  DF VPN Bot — установщик для VPS (Debian/Ubuntu).
+#  OPVPN — установщик для VPS (Debian/Ubuntu).
 #
 #  Быстрый старт:
 #      sudo bash install.sh
@@ -41,7 +41,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
   cat <<'EOF'
-DF VPN Bot — установщик
+OPVPN — установщик
 
 Использование:
   sudo bash install.sh [опции]
@@ -164,7 +164,7 @@ collect_config() {
   printf '\n%s\n' "${c_blu}=== Настройка бота ===${c_reset}"
   ask_required BOT_TOKEN "Токен бота от @BotFather"
   ask_required ADMIN_IDS "Ваш Telegram ID (из @userinfobot), можно несколько через запятую"
-  ask BOT_NAME "Название сервиса" "DF VPN"
+  ask BOT_NAME "Название сервиса" "OPVPN"
   ask SUPPORT_USERNAME "Поддержка, без @" "support"
   ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa,yoomoney,stars,balance,manual"
 
@@ -344,7 +344,7 @@ write_service() {
 
   cat > "$UNIT_PATH" <<EOF
 [Unit]
-Description=DF VPN Bot (Telegram bot for VPN subscriptions)
+Description=OPVPN (Telegram bot for VPN subscriptions)
 After=network-online.target
 Wants=network-online.target
 
