@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Optional
@@ -27,14 +28,26 @@ class YooKassaClient:
         self.shop_id = cfg.yookassa_shop_id
         self.secret_key = cfg.yookassa_secret_key
         self.return_url = cfg.yookassa_return_url
+        self.proxy = cfg.payments_proxy or None
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             auth = aiohttp.BasicAuth(self.shop_id, self.secret_key)
+            # api.yookassa.ru отдаёт НЕСКОЛЬКО A-записей; часть из них может
+            # быть недоступна с конкретного VPS. happy-eyeballs (включён явно,
+            # чтобы не зависеть от версии aiohttp) поднимает соединение со
+            # всеми адресами параллельно, а короткие connect/total не дают
+            # мёртвому адресу «съесть» весь бюджет запроса: иначе вебхук
+            # отдаёт 504, а проверка падает с asyncio.TimeoutError.
+            connector = aiohttp.TCPConnector(
+                happy_eyeballs_delay=0.25,
+                interleave=1,
+            )
             self._session = aiohttp.ClientSession(
                 auth=auth,
-                timeout=aiohttp.ClientTimeout(total=25),
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=15, connect=5),
                 headers={"Content-Type": "application/json"},
             )
         return self._session
@@ -58,28 +71,36 @@ class YooKassaClient:
             payload["payment_method_data"] = {"type": "sbp"}
         session = await self._get_session()
         headers = {"Idempotence-Key": idempotence_key or str(uuid.uuid4())}
-        async with session.post(f"{YOOKASSA_API}/payments", json=payload, headers=headers) as resp:
-            raw = await resp.text()
-            if resp.status >= 400:
-                raise PaymentError(f"ЮKassa вернула HTTP {resp.status}: {raw[:300]}")
-            return await resp.json(content_type=None)
+        try:
+            async with session.post(f"{YOOKASSA_API}/payments", json=payload, headers=headers,
+                                    proxy=self.proxy) as resp:
+                raw = await resp.text()
+                if resp.status >= 400:
+                    raise PaymentError(f"ЮKassa вернула HTTP {resp.status}: {raw[:300]}")
+                return await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # Сеть/DNS/SSL недоступны — это не ошибка API, но вызывающий код
+            # (и пользователь) должны получить понятный PaymentError.
+            raise PaymentError(f"Нет связи с ЮKassa ({type(exc).__name__}): {exc}") from exc
 
     async def get_payment(self, payment_id: str) -> dict[str, Any]:
         session = await self._get_session()
-        async with session.get(f"{YOOKASSA_API}/payments/{payment_id}") as resp:
-            raw = await resp.text()
-            if resp.status >= 400:
-                raise PaymentError(f"ЮKassa вернула HTTP {resp.status}: {raw[:300]}")
-            return await resp.json(content_type=None)
-
-    async def is_paid(self, payment_id: str, expected_amount: int | None = None) -> bool:
-        """Проверяет платёж напрямую в API — единственный надёжный способ
-        подтвердить уведомление/оплату (телу вебхука доверять нельзя)."""
         try:
-            payment = await self.get_payment(payment_id)
-        except PaymentError as exc:
-            log.warning("Проверка платежа %s не удалась: %s", payment_id, exc)
-            return False
+            async with session.get(f"{YOOKASSA_API}/payments/{payment_id}",
+                                   proxy=self.proxy) as resp:
+                raw = await resp.text()
+                if resp.status >= 400:
+                    raise PaymentError(f"ЮKassa вернула HTTP {resp.status}: {raw[:300]}")
+                return await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise PaymentError(f"Нет связи с ЮKassa ({type(exc).__name__}): {exc}") from exc
+
+    @staticmethod
+    def payment_is_valid(payment: dict[str, Any], expected_amount: int | None = None) -> bool:
+        """Проверяет объект платежа ЮKassa: ``succeeded`` + ``paid`` и (если задано) сумму.
+
+        Чистая функция без сети — годится и для вебхука, и для опроса.
+        """
         if payment.get("status") != "succeeded" or not payment.get("paid", False):
             return False
         if expected_amount is not None:
@@ -88,9 +109,24 @@ class YooKassaClient:
             except (KeyError, TypeError, ValueError):
                 return False
             if abs(value - expected_amount) > 0.01:
-                log.warning("Сумма платежа %s (%s) не совпала с ожидаемой (%s)", payment_id, value, expected_amount)
+                log.warning("Сумма платежа %s (%s) не совпала с ожидаемой (%s)",
+                            payment.get("id", "?"), value, expected_amount)
                 return False
         return True
+
+    async def is_paid(self, payment_id: str, expected_amount: int | None = None) -> bool:
+        """Проверяет платёж напрямую в API — единственный надёжный способ
+        подтвердить уведомление/оплату (телу вебхука доверять нельзя).
+
+        Возвращает ``False`` и при сетевом сбое (исключение не роняем) —
+        вызывающий код сам решает, ответить 200 или повторить проверку позже.
+        """
+        try:
+            payment = await self.get_payment(payment_id)
+        except PaymentError as exc:
+            log.warning("Проверка платежа %s не удалась: %s", payment_id, exc)
+            return False
+        return self.payment_is_valid(payment, expected_amount)
 
 
 async def create_stars_invoice(bot, *, chat_id: int, order_id: int, title: str, description: str,
@@ -133,6 +169,7 @@ class YooMoneyClient:
         self.wallet = cfg.yoomoney_wallet
         self.token = cfg.yoomoney_token
         self.bot_name = cfg.bot_name
+        self.proxy = cfg.payments_proxy or None
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -173,6 +210,7 @@ class YooMoneyClient:
             async with session.get(
                 f"{self.API_URL}/operation-history",
                 params={"label": self.label_for(order_id), "details": "true"},
+                proxy=self.proxy,
             ) as resp:
                 if resp.status != 200:
                     log.warning("ЮMoney operation-history: HTTP %s", resp.status)

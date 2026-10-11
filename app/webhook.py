@@ -6,8 +6,9 @@
 
 Телу уведомления доверять нельзя: получив событие, бот переспрашивает платёж
 через API (``GET /v3/payments/{id}``) и выдаёт доступ, только если платёж
-действительно ``succeeded`` и сумма совпадает с суммой заказа. Если обработка
-не удалась, отдаём 500 — ЮKassa повторит уведомление.
+действительно ``succeeded`` и сумма совпадает с суммой заказа. Если выдача
+не удалась, отдаём 500, а если недоступна сама ЮKassa — 503; в обоих случаях
+ЮKassa повторит уведомление.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from aiohttp import web
 
 from app.config import Config
 from app.db import Database
-from app.services.payments import YooKassaClient
+from app.services.payments import PaymentError, YooKassaClient
 from app.services.subs import complete_order
 
 log = logging.getLogger(__name__)
@@ -101,8 +102,16 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
         if yk is None:
             return web.Response(status=500, text="yookassa disabled")
 
-        paid = await yk.is_paid(payment_id, int(order["amount"]))
-        if not paid:
+        # Сетевой сбой (ЮKassa недоступна из VPS) — это НЕ «не оплачено»:
+        # отдаём 503, чтобы ЮKassa повторила уведомление, а не считала его
+        # доставленным. Иначе платёж «зависает» до опроса раз в 3 минуты.
+        try:
+            payment = await yk.get_payment(payment_id)
+        except PaymentError as exc:
+            log.warning("ЮKassa недоступна при проверке %s: %s — просим повтор", payment_id, exc)
+            return web.Response(status=503, text="yookassa unavailable, retry")
+
+        if not yk.payment_is_valid(payment, int(order["amount"])):
             log.warning("Платёж %s не подтверждён через API — пропускаем", payment_id)
             return web.Response(status=200, text="not verified")
 

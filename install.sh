@@ -178,7 +178,7 @@ collect_config() {
         ask XUI_USERNAME "Логин 3x-ui" "admin"
         ask_required XUI_PASSWORD "Пароль 3x-ui"
       fi
-      ask XUI_INBOUND_ID "ID inbound'а" "1"
+      ask XUI_INBOUND_IDS "ID inbound'ов (через запятую, можно несколько)" "1"
       ask XUI_PUBLIC_HOST "Публичный адрес сервера для ссылок (необязательно)" ""
       ask_choice CLAIM_ENABLED "Включить привязку готовых клиентов 3x-ui по QR/ссылке" "false" false true
       if [ "${CLAIM_ENABLED:-false}" = "true" ] && [ -z "${CLAIM_SECRET:-}" ]; then
@@ -241,7 +241,7 @@ write_env() {
       put_env "$env_file" XUI_API_TOKEN "${XUI_API_TOKEN:-}"
       put_env "$env_file" XUI_USERNAME "${XUI_USERNAME:-}"
       put_env "$env_file" XUI_PASSWORD "${XUI_PASSWORD:-}"
-      put_env "$env_file" XUI_INBOUND_ID "${XUI_INBOUND_ID:-}"
+      put_env "$env_file" XUI_INBOUND_IDS "${XUI_INBOUND_IDS:-}"
       put_env "$env_file" XUI_PUBLIC_HOST "${XUI_PUBLIC_HOST:-}"
       if [ "${CLAIM_ENABLED:-false}" = "true" ]; then
         set_env "$env_file" CLAIM_ENABLED true

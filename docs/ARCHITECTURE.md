@@ -62,7 +62,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 `BasePanel` — контракт: `create_client / extend_client / set_enabled / delete_client / health / close`. Возвращает `IssuedKey(vpn_key, sub_url, panel, panel_username)`.
 
 * **PoolPanel** — выдаёт готовый конфиг из `key_pool` (приоритет: под тариф → plan_code IS NULL → любой свободный). Продление — только в БД.
-* **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp).
+* **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
 * **MarzbanPanel** — OAuth-токен `/api/admin/token`, CRUD `/api/user`, повтор авторизации при 401/403, продление через PUT `expire/status`.
 * Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
 

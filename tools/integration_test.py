@@ -135,6 +135,9 @@ async def run() -> None:
     await db.connect()
     await rt.load(db, cfg)
     await db.add_keys([f"vless://pool-key-{i}@srv:443#pool{i}" for i in range(5)])
+    # Тест использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
+    await db.upsert_plan("1m", "1 месяц", 150, 30, 0, 2)
+    await db.upsert_plan("3m", "3 месяца", 405, 90, 0, 3)
 
     bot = Bot(cfg.bot_token)
     install_stubs(bot)

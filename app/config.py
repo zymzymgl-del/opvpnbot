@@ -90,6 +90,19 @@ def _list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.replace(";", ",").split(",") if part.strip())
 
 
+def _xui_inbound_ids() -> tuple[int, ...]:
+    """Inbound'ы 3x-ui для выдачи: XUI_INBOUND_IDS (через запятую) с откатом на XUI_INBOUND_ID.
+
+    Несколько ID — тогда панель соберёт конфиги из всех этих inbound'ов в одну
+    подписку /sub/{subId} (разные шифрования/транспорты в рамках одного ключа).
+    """
+    ids = _ints("XUI_INBOUND_IDS")
+    if ids:
+        return ids
+    single = _int("XUI_INBOUND_ID", 0)
+    return (single,) if single else ()
+
+
 @dataclass(frozen=True)
 class Config:
     # --- Telegram ---
@@ -126,6 +139,7 @@ class Config:
     min_topup: int
     max_topup: int
     manual_payment_note: str
+    payments_proxy: str
 
     # --- Панель выдачи ключей ---
     panel: str
@@ -134,6 +148,7 @@ class Config:
     xui_password: str
     xui_api_token: str
     xui_inbound_id: int
+    xui_inbound_ids: tuple[int, ...]
     xui_public_host: str
     xui_sub_base: str
     marzban_url: str
@@ -236,12 +251,14 @@ def load_config() -> Config:
         min_topup=_int("MIN_TOPUP", 100),
         max_topup=_int("MAX_TOPUP", 50000),
         manual_payment_note=_str("MANUAL_PAYMENT_NOTE", "Реквизиты уточняйте у поддержки."),
+        payments_proxy=_str("PAYMENTS_PROXY"),
         panel=_str("VPN_PANEL", "pool").lower(),
         xui_url=_str("XUI_URL").rstrip("/"),
         xui_username=_str("XUI_USERNAME", "admin"),
         xui_password=_str("XUI_PASSWORD"),
         xui_api_token=_str("XUI_API_TOKEN"),
         xui_inbound_id=_int("XUI_INBOUND_ID", 0),
+        xui_inbound_ids=_xui_inbound_ids(),
         xui_public_host=_str("XUI_PUBLIC_HOST"),
         xui_sub_base=_str("XUI_SUB_BASE").rstrip("/"),
         marzban_url=_str("MARZBAN_URL").rstrip("/"),
@@ -311,5 +328,10 @@ def validate(cfg: Config) -> list[str]:
         problems.append(
             "WEBHOOK_ENABLED=true, но WEBHOOK_PUBLIC_URL не задан — укажите публичный адрес "
             "вида https://bot.example.com/yookassa/webhook и пропишите его в кабинете ЮKassa."
+        )
+    if cfg.payments_proxy and not cfg.payments_proxy.startswith(("http://", "https://")):
+        problems.append(
+            "PAYMENTS_PROXY должен начинаться с http:// или https:// "
+            "(aiohttp умеет только HTTP-прокси; для SOCKS нужна библиотека aiohttp-socks)."
         )
     return problems

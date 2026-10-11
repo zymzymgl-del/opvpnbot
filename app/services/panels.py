@@ -130,6 +130,9 @@ class XuiPanel(BasePanel):
         self.username = cfg.xui_username
         self.password = cfg.xui_password
         self.token = cfg.xui_api_token
+        self.inbound_ids = tuple(cfg.xui_inbound_ids) or (
+            (cfg.xui_inbound_id,) if cfg.xui_inbound_id else ()
+        )
         self.inbound_id = cfg.xui_inbound_id
         self.public_host = cfg.xui_public_host
         self.sub_base = cfg.xui_sub_base
@@ -194,16 +197,30 @@ class XuiPanel(BasePanel):
         data = await self._api("/inbounds/list")
         return list(data.get("obj") or [])
 
-    async def _inbound(self) -> dict:
+    async def _inbounds(self) -> list[dict]:
+        """Inbound'ы, в которые бот добавляет клиента (все из XUI_INBOUND_IDS).
+
+        Клиент с одним email/subId попадает сразу во все эти inbound'ы, поэтому
+        подписка /sub/{subId} отдаёт конфиги со всеми шифрованиями/транспортами.
+        Пустой список = взять первый inbound панели (старое поведение).
+        """
         inbounds = await self._list_inbounds()
         if not inbounds:
             raise PanelError("3x-ui: в панели нет ни одного inbound.")
-        if self.inbound_id:
-            for inbound in inbounds:
-                if int(inbound.get("id") or 0) == self.inbound_id:
-                    return inbound
-            raise PanelError(f"3x-ui: inbound id={self.inbound_id} не найден.")
-        return inbounds[0]
+        if not self.inbound_ids:
+            return [inbounds[0]]
+        by_id = {int(inbound.get("id") or 0): inbound for inbound in inbounds}
+        selected: list[dict] = []
+        for inbound_id in self.inbound_ids:
+            inbound = by_id.get(inbound_id)
+            if inbound is None:
+                raise PanelError(f"3x-ui: inbound id={inbound_id} не найден.")
+            selected.append(inbound)
+        return selected
+
+    async def _inbound(self) -> dict:
+        """Первый из выбранных inbound'ов (для одиночных операций/совместимости)."""
+        return (await self._inbounds())[0]
 
     @staticmethod
     def _clients(inbound: dict) -> list[dict]:
@@ -258,15 +275,21 @@ class XuiPanel(BasePanel):
         """
         payload = dict(client)
         payload["id"] = XuiPanel._client_identity(client, "vless")
+        # limitHwid панель может вернуть в объекте клиента, но обновление
+        # применяет его заново. Держим значение 0 = без ограничений: на 3x-ui 3.x
+        # этот лимит гейтит подписку, и клиенты без заголовка X-HWID получают 404.
+        payload["limitHwid"] = 0
         allowed = payload.get("allowedIPs")
         if isinstance(allowed, str):
             payload["allowedIPs"] = [v.strip() for v in allowed.split(",") if v.strip()]
         return payload
 
-    async def _create_client_clients_api(self, inbound: dict, protocol: str, *, user_id: int,
+    async def _create_client_clients_api(self, inbounds: list[dict], *, user_id: int,
                                          days: int, devices: int, traffic_gb: int,
                                          plan_code: str) -> IssuedKey:
-        settings = self._clients(inbound)
+        first = inbounds[0]
+        protocol = str(first.get("protocol") or "vless")
+        settings = self._clients(first)
         template = settings[0] if settings else {}
         email = f"tg{user_id}_{plan_code}_{int(time.time())}"
         expiry_ms = int(now_plus(days).timestamp() * 1000)
@@ -277,15 +300,22 @@ class XuiPanel(BasePanel):
             "expiryTime": expiry_ms,
             "totalGB": traffic_gb * 1024 ** 3,
             "limitIp": max(1, devices),
-            "limitHwid": max(1, devices),
+            # limitHwid НЕ ставим: в 3x-ui 3.x это не «лимит устройств», а гейт
+            # подписочного сервиса — при limitHwid > 0 запрос подписки без
+            # заголовка X-HWID (v2rayN, v2rayNG, NekoBox и т.п.) получает 404, и
+            # ссылка «не резолвится», хотя в браузере открывается HTML-страница.
+            # Лимит устройств обеспечивает limitIp.
             "tgId": int(user_id),
+            # Один subId на все inbound'ы: панель собирает /sub/{subId} по всем
+            # инбаундам с этим subId, поэтому разные шифрования попадут в одну подписку.
+            "subId": secrets.token_hex(8),
         }
-        if protocol == "vless" and flow:
+        if protocol == "vless" and flow and (len(inbounds) == 1 or _flow_applies_to_all(inbounds)):
             client["flow"] = flow
         await self._api(
             "/clients/add",
             method="POST",
-            payload={"client": client, "inboundIds": [int(inbound["id"])]},
+            payload={"client": client, "inboundIds": [int(i["id"]) for i in inbounds]},
         )
         try:
             created = await self._get_client(email)
@@ -294,14 +324,34 @@ class XuiPanel(BasePanel):
             # откатываем, чтобы не оставлять «мёртвую» запись.
             await self.delete_client(panel_username=email)
             raise
-        link = _build_link(
-            inbound,
-            {"id": self._client_identity(created, protocol), "flow": created.get("flow", ""), "email": email},
-            self.public_host or _host_from_url(self.base),
-        )
-        sub_id = created.get("subId")
+        sub_id = created.get("subId") or client["subId"]
         sub_url = f"{self.sub_base}/{sub_id}" if (self.sub_base and sub_id) else None
-        return IssuedKey(vpn_key=link, sub_url=sub_url, panel=self.name, panel_username=email)
+        if sub_url:
+            # Клиент создан сразу во всех inbound'ах, а подписку /sub/{subId} целиком
+            # собирает панель (по всем инбаундам клиента). Бот отдаёт ТОЛЬКО её —
+            # прямые ссылки не конструируются.
+            return IssuedKey(vpn_key=sub_url, sub_url=sub_url, panel=self.name,
+                             panel_username=email)
+        # Подписка в панели не включена (нет XUI_SUB_BASE) — собираем прямые ссылки.
+        host = self.public_host or _host_from_url(self.base)
+        links = [
+            _build_link(
+                inbound,
+                {
+                    "id": self._client_identity(created, str(inbound.get("protocol") or "vless")),
+                    "flow": created.get("flow", ""),
+                    "email": email,
+                },
+                host,
+            )
+            for inbound in inbounds
+        ]
+        return IssuedKey(
+            vpn_key="\n".join(link for link in links if link),
+            sub_url=None,
+            panel=self.name,
+            panel_username=email,
+        )
 
     async def _extend_client_clients_api(self, email: str, days: int, devices: int | None = None) -> bool:
         try:
@@ -318,7 +368,6 @@ class XuiPanel(BasePanel):
         payload["enable"] = True
         if devices is not None:
             payload["limitIp"] = max(1, devices)
-            payload["limitHwid"] = max(1, devices)
         await self._api(
             f"/clients/update/{quote(email, safe='')}",
             method="POST",
@@ -329,13 +378,26 @@ class XuiPanel(BasePanel):
     # --- публичный API ----------------------------------------------------
     async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
                             plan_code: str) -> IssuedKey:
-        inbound = await self._inbound()
-        protocol = str(inbound.get("protocol") or "vless")
+        inbounds = await self._inbounds()
         if await self._uses_clients_api():
             return await self._create_client_clients_api(
-                inbound, protocol, user_id=user_id, days=days,
+                inbounds, user_id=user_id, days=days,
                 devices=devices, traffic_gb=traffic_gb, plan_code=plan_code,
             )
+        if len(inbounds) > 1:
+            raise PanelError(
+                "3x-ui: несколько inbound'ов (XUI_INBOUND_IDS) поддерживаются только на "
+                "актуальных сборках панели (API /panel/api/clients). Обновите 3x-ui "
+                "или укажите один XUI_INBOUND_ID."
+            )
+        return await self._create_client_classic(
+            inbounds[0], user_id=user_id, days=days,
+            devices=devices, traffic_gb=traffic_gb, plan_code=plan_code,
+        )
+
+    async def _create_client_classic(self, inbound: dict, *, user_id: int, days: int,
+                                     devices: int, traffic_gb: int, plan_code: str) -> IssuedKey:
+        protocol = str(inbound.get("protocol") or "vless")
         settings = self._clients(inbound)
         template = settings[0] if settings else {}
         email = f"tg{user_id}_{plan_code}_{int(time.time())}"
@@ -347,7 +409,7 @@ class XuiPanel(BasePanel):
             "flow": template.get("flow", "xtls-rprx-vision" if protocol == "vless" else ""),
             "email": email,
             "limitIp": max(1, devices),
-            "limitHwid": max(1, devices),
+            # limitHwid не передаём — см. пояснение в _create_client_clients_api.
             "totalGB": traffic_gb * 1024**3,
             "expiryTime": expiry_ms,
             "enable": True,
@@ -366,7 +428,9 @@ class XuiPanel(BasePanel):
         )
         link = _build_link(inbound, client, self.public_host or _host_from_url(self.base))
         sub_url = f"{self.sub_base}/{sub_id}" if self.sub_base else None
-        return IssuedKey(vpn_key=link, sub_url=sub_url, panel=self.name, panel_username=email)
+        # Если подписка панели включена — отдаём только её, без прямого конфига.
+        return IssuedKey(vpn_key=sub_url or link, sub_url=sub_url, panel=self.name,
+                         panel_username=email)
 
     async def extend_client(self, *, panel_username: str, days: int,
                             devices: int | None = None, traffic_gb: int | None = None) -> bool:
@@ -381,7 +445,7 @@ class XuiPanel(BasePanel):
         client["enable"] = True
         if devices is not None:
             client["limitIp"] = max(1, devices)
-            client["limitHwid"] = max(1, devices)
+            client.pop("limitHwid", None)
         await self._api(
             f"/inbounds/updateClient/{client['id']}",
             method="POST",
@@ -430,14 +494,15 @@ class XuiPanel(BasePanel):
 
     async def health(self) -> tuple[bool, str]:
         try:
-            inbound = await self._inbound()
+            inbounds = await self._inbounds()
         except PanelError as exc:
             return False, str(exc)
-        clients = len(self._clients(inbound))
-        return True, (
-            f"inbound #{inbound['id']} ({inbound.get('protocol')}:{inbound.get('port')}), "
-            f"клиентов в панели: {clients}"
-        )
+        parts = [
+            f"#{inbound['id']} ({inbound.get('protocol')}:{inbound.get('port')}), "
+            f"клиентов: {len(self._clients(inbound))}"
+            for inbound in inbounds
+        ]
+        return True, "inbound'ы: " + "; ".join(parts)
 
     async def list_claimable(self) -> list[ClaimedClient]:
         """Все клиенты инбаундов, у которых есть subId — кандидаты на привязку."""
@@ -447,6 +512,7 @@ class XuiPanel(BasePanel):
             return []
         host = self.public_host or _host_from_url(self.base)
         result: list[ClaimedClient] = []
+        seen: set[str] = set()
         for inbound in inbounds:
             protocol = str(inbound.get("protocol") or "vless")
             for client in self._clients(inbound):
@@ -454,6 +520,11 @@ class XuiPanel(BasePanel):
                 email = client.get("email")
                 if not sub_id or not email:
                     continue
+                # Один клиент может присутствовать в нескольких inbound'ах (мульти-
+                # inbound) — привязываем его один раз.
+                if str(email) in seen:
+                    continue
+                seen.add(str(email))
                 try:
                     link = _build_link(
                         inbound,
@@ -475,7 +546,7 @@ class XuiPanel(BasePanel):
                     vpn_key=link,
                     sub_url=sub_url,
                     expires_at=datetime.fromtimestamp(expiry_ms / 1000, tz=timezone.utc) if expiry_ms > 0 else None,
-                    devices=max(1, int(client.get("limitIp") or client.get("limitHwid") or 1)),
+                    devices=max(1, int(client.get("limitIp") or 1)),
                     traffic_gb=total_gb // (1024 ** 3) if total_gb > 0 else 0,
                     enabled=bool(client.get("enable", True)),
                 ))
@@ -493,6 +564,21 @@ def _as_dict(value: object) -> dict:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _flow_applies_to_all(inbounds: list[dict]) -> bool:
+    """flow (xtls-rprx-vision) корректен для всех inbound'ов: только vless поверх tcp+tls/reality.
+
+    При одном клиенте на несколько inbound'ов flow общий, поэтому в мульти-inbound
+    режиме его ставят, только если он уместен для каждого из них.
+    """
+    for inbound in inbounds:
+        if str(inbound.get("protocol") or "vless") != "vless":
+            return False
+        stream = _as_dict(inbound.get("streamSettings"))
+        if stream.get("network", "tcp") != "tcp" or stream.get("security") not in {"reality", "tls", "xtls"}:
+            return False
+    return True
 
 
 def _host_from_url(url: str) -> str:

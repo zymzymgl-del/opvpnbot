@@ -47,6 +47,7 @@ from app.services.panels import (  # noqa: E402
     XuiPanel,
     _as_dict,
     _build_link,
+    _flow_applies_to_all,
     get_panel,
 )
 from app.services import panels as panels_mod  # noqa: E402
@@ -121,6 +122,11 @@ async def run() -> None:
     await rt.load(db, cfg)
     check("тарифы посеяны по умолчанию", len(await db.active_plans()) == 4)
     check("рантайм подхватил реф-процент из .env", rt.ref_percent == 20, str(rt.ref_percent))
+
+    # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
+    # без этих тарифов сценарий падает на первом же grant_subscription.
+    await db.upsert_plan("1m", "1 месяц", 150, 30, 0, 2)
+    await db.upsert_plan("3m", "3 месяца", 405, 90, 0, 3)
 
     bot = FakeBot()
     print("\n2. Выдача и продление подписок (панель pool)")
@@ -277,6 +283,19 @@ async def run() -> None:
     xui_cfg = load_config()
     XuiPanel(xui_cfg)
     check("XUI URL разобран", XuiPanel(xui_cfg).base.endswith("/secretpath"))
+    os.environ["XUI_INBOUND_IDS"] = "1, 3;7"
+    multi_cfg = load_config()
+    check("XUI_INBOUND_IDS разобран в список", multi_cfg.xui_inbound_ids == (1, 3, 7), str(multi_cfg.xui_inbound_ids))
+    check("XuiPanel хранит список inbound'ов", XuiPanel(multi_cfg).inbound_ids == (1, 3, 7))
+    os.environ.pop("XUI_INBOUND_IDS", None)
+    check("мульти-inbound: flow корректен для vless tcp+tls/reality", _flow_applies_to_all([
+        {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}'},
+        {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "tls"}'},
+    ]))
+    check("мульти-inbound: ws/trojan отключают flow", not _flow_applies_to_all([
+        {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
+        {"protocol": "trojan", "streamSettings": '{"network": "tcp", "security": "tls"}'},
+    ]))
     mb = MarzbanPanel(cfg) if cfg.marzban_url else None
     check("MarzbanPanel корректно требует настройки", mb is None or mb.base == "")
     panel = get_panel(cfg, db)
@@ -328,12 +347,12 @@ async def run() -> None:
             self.calls: list = []
             self.closed = False
 
-        def post(self, url, json=None, headers=None):
+        def post(self, url, json=None, headers=None, **kwargs):
             self.calls.append(("POST", url, json, headers))
             status, payload = self.responses.pop(0)
             return FakeResponse(status, payload)
 
-        def get(self, url, params=None):
+        def get(self, url, params=None, **kwargs):
             self.calls.append(("GET", url, params, None))
             status, payload = self.responses.pop(0)
             return FakeResponse(status, payload)

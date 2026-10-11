@@ -42,6 +42,7 @@ WEBHOOK_ENABLED=true
 WEBHOOK_PORT=8080
 WEBHOOK_PATH=/yookassa/webhook
 WEBHOOK_PUBLIC_URL=https://bot.example.com/yookassa/webhook
+WEBHOOK_TRUST_PROXY=true   # бот за nginx — обязательно, иначе все вебхуки получат 403
 ```
 
 2. Проксируйте адрес на локальный порт бота. Пример для nginx:
@@ -56,8 +57,14 @@ server {
 
     location /yookassa/webhook {
         proxy_pass http://127.0.0.1:8080/yookassa/webhook;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        # X-Forwarded-For ОБЯЗАТЕЛЕН при WEBHOOK_TRUST_PROXY=true,
+        # иначе бот не увидит реальный IP ЮKassa и посчитает это подделкой.
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
     }
 }
 ```
@@ -82,6 +89,35 @@ server {
 
 Возврат оформляется в кабинете ЮKassa. Отметьте заказ отменённым в админке
 (💰 Заказы) или выдайте доступ вручную — бот не списывает подписку автоматически.
+
+### VPS за рубежом: ЮKassa недоступна (частый случай)
+
+Если сервер стоит не в РФ, исходящие запросы к `api.yookassa.ru` нередко «зависают»:
+вебхук отдаёт `504`, а кнопка «🔄 Проверить оплату» падает с `asyncio.TimeoutError`.
+При этом Telegram работает (поллинг жив), потому что проблема — только в маршруте
+до российского платёжного сервиса.
+
+Проверьте на сервере:
+
+```bash
+getent ahosts api.yookassa.ru
+for ip in $(getent ahosts api.yookassa.ru | awk '/STREAM/{print $1}'); do
+  curl -sS --max-time 8 --resolve api.yookassa.ru:443:$ip -o /dev/null \
+    -w "$ip -> http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n" \
+    https://api.yookassa.ru/v3/me
+done
+```
+
+Если адреса `api.yookassa.ru` не отвечают (или отвечает лишь часть), включите прокси
+до российского узла (маленький VPS в РФ с `3proxy`/`gost`, или `ssh -L`):
+
+```env
+# http-прокси (aiohttp умеет только http/https; SOCKS — через aiohttp-socks)
+PAYMENTS_PROXY=http://user:pass@ru-relay.example.com:3128
+```
+
+То же значение используется и для ЮMoney. Пусто — бот ходит к платёжным API напрямую.
+Код при недоступности API не висит: отдаёт `503`, и ЮKassa повторяет уведомление.
 
 ---
 
