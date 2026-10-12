@@ -48,6 +48,7 @@ from bot import build_dispatcher  # noqa: E402
 
 OUT: list[tuple[str, str]] = []          # (вид, текст)
 CALLBACK_ANSWERS: list[str] = []
+EDITS: list[str] = []                     # тексты, показанные правкой сообщения (режим одного окна)
 
 
 def install_stubs(bot: Bot) -> None:
@@ -79,7 +80,9 @@ def install_stubs(bot: Bot) -> None:
         elif name == "SendInvoice":
             OUT.append(("invoice", f"{getattr(method, 'title', '')} / {getattr(method, 'prices', '')}"))
         elif name == "EditMessageText":
-            OUT.append(("message", getattr(method, "text", "") or ""))
+            text = getattr(method, "text", "") or ""
+            EDITS.append(text)
+            OUT.append(("message", text))
         elif name in ("AnswerCallbackQuery", "AnswerPreCheckoutQuery"):
             text = getattr(method, "text", None)
             if text:
@@ -248,11 +251,17 @@ async def run() -> None:
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "buy:3m", 8))
     promo_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
+    EDITS.clear()
     await dp.feed_update(bot, make_callback(555, f"promo:order:{promo_order}", 9))
+    expect("подсказка промокода — правка окна (одно окно)",
+           any("Введите промокод" in t for t in EDITS), str(EDITS)[:120])
+    EDITS.clear()
     await dp.feed_update(bot, make_message(555, "sale25", 10))
     order = await db.get_order(promo_order)
     expect("скидка 25% применена", int(order["amount"]) == 405 - 101, str(order["amount"]))
     expect("сообщение об успехе промокода", "применён" in sent("message"), sent("message")[:120])
+    expect("результат промокода — правка окна (одно окно)",
+           any("применён" in t for t in EDITS), str(EDITS)[:120])
     promo_used = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
     expect("применение промокода резервирует его", promo_used == 1, str(promo_used))
 

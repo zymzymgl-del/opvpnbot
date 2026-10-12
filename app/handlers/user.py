@@ -111,6 +111,32 @@ async def _send_menu_window(message: Message, text: str, cfg: Config) -> None:
         text, reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
 
 
+#: Ключ в FSM-данных: id сообщения-«окна», которое правят шаги ввода текста.
+UI_WINDOW_KEY = "ui_window_id"
+
+
+async def _remember_window(state: FSMContext, message_id: int) -> None:
+    """Запоминает окно, которое будут править последующие шаги ввода текста."""
+    await state.update_data(**{UI_WINDOW_KEY: message_id})
+
+
+async def _prompt_window(call: CallbackQuery, state: FSMContext, text: str, markup=None) -> None:
+    """Показывает подсказку ввода в текущем окне (режим одного окна)."""
+    await _remember_window(state, call.message.message_id)
+    await _edit_or_answer(call, text, markup)
+
+
+async def _apply_window(bot: Bot, chat_id: int, window_id, text: str, markup=None) -> None:
+    """Результат ввода: правит окно (если помним его id), иначе шлёт новое сообщение."""
+    if isinstance(window_id, int):
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=window_id, reply_markup=markup)
+            return
+        except Exception as exc:  # окно могло быть удалено — не критично
+            log.info("Не удалось обновить окно %s: %s", window_id, exc)
+    await bot.send_message(chat_id, text, reply_markup=markup)
+
+
 class PromoStates(StatesGroup):
     enter = State()
 
@@ -171,7 +197,8 @@ async def msg_legacy_reply_button(message: Message, cfg: Config) -> None:
 
 
 @router.callback_query(F.data == "menu:main")
-async def cb_main_menu(call: CallbackQuery, cfg: Config) -> None:
+async def cb_main_menu(call: CallbackQuery, cfg: Config, state: FSMContext) -> None:
+    await state.clear()
     await _show_main_menu(call, cfg)
     await call.answer()
 
@@ -248,7 +275,8 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
 
 
 @router.callback_query(F.data == "menu:buy")
-async def cb_plans(call: CallbackQuery, db: Database, cfg: Config) -> None:
+async def cb_plans(call: CallbackQuery, db: Database, cfg: Config, state: FSMContext) -> None:
+    await state.clear()  # эта кнопка — цель «Отмены» шагов ввода
     await _show_plans(call, db, cfg)
     await call.answer()
 
@@ -338,7 +366,7 @@ async def cb_cancel_order(call: CallbackQuery, db: Database, cfg: Config) -> Non
 @router.callback_query(F.data == "promo:enter")
 async def cb_promo_enter(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(PromoStates.enter)
-    await call.message.answer("🎟 Введите промокод одним сообщением:", reply_markup=cancel_kb("menu:buy"))
+    await _prompt_window(call, state, "🎟 Введите промокод одним сообщением:", cancel_kb("menu:buy"))
     await call.answer()
 
 
@@ -351,7 +379,7 @@ async def cb_promo_order(call: CallbackQuery, state: FSMContext, db: Database) -
         return
     await state.update_data(promo_order=order_id)
     await state.set_state(PromoStates.enter)
-    await call.message.answer("🎟 Введите промокод:", reply_markup=cancel_kb(f"order:show:{order_id}"))
+    await _prompt_window(call, state, "🎟 Введите промокод:", cancel_kb(f"order:show:{order_id}"))
     await call.answer()
 
 
@@ -368,24 +396,26 @@ async def cb_order_show(call: CallbackQuery, db: Database, cfg: Config, state: F
 
 
 @router.message(PromoStates.enter)
-async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Config) -> None:
+async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot) -> None:
     data = await state.get_data()
     order_id = data.get("promo_order")
+    window_id = data.get(UI_WINDOW_KEY)
     code = (message.text or "").strip().upper()
     await state.clear()
 
     if not order_id:
         plans = await db.active_plans()
-        await message.answer("Промокод можно применить при оформлении заказа: выберите тариф и нажмите «🎟 Промокод».",
-                             reply_markup=plans_kb(plans, cfg.currency))
+        await _apply_window(bot, message.chat.id, window_id,
+                            "Промокод можно применить при оформлении заказа: выберите тариф и нажмите «🎟 Промокод».",
+                            plans_kb(plans, cfg.currency))
         return
 
     order = await db.get_order(int(order_id))
     if not _is_owner(order, message.from_user.id):
-        await message.answer("Заказ не найден.", reply_markup=back_kb())
+        await _apply_window(bot, message.chat.id, window_id, "Заказ не найден.", back_kb())
         return
     if order["status"] != "pending":
-        await message.answer("Заказ уже неактуален.", reply_markup=back_kb())
+        await _apply_window(bot, message.chat.id, window_id, "Заказ уже неактуален.", back_kb())
         return
 
     base = int(order["base_amount"])
@@ -398,7 +428,8 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
     else:
         valid, reason, promo = await db.reserve_promo(code, message.from_user.id)
         if not valid or promo is None:
-            await message.answer(f"❌ {reason}", reply_markup=back_kb(f"order:show:{order_id}"))
+            await _apply_window(bot, message.chat.id, window_id, f"❌ {reason}",
+                                back_kb(f"order:show:{order_id}"))
             return
         if promo["discount_type"] == "percent":
             discount = base * int(promo["value"]) // 100
@@ -409,14 +440,15 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
             # На заказе был другой промокод — освобождаем его использование.
             await db.release_promo(reserved_code, message.from_user.id)
         await db.set_order_promo(int(order_id), new_amount, discount, code)
-    await message.answer(
+    await _apply_window(
+        bot, message.chat.id, window_id,
         f"✅ Промокод <code>{esc(code)}</code> применён!\n"
         f"Скидка: <b>{price(discount, cfg.currency)}</b>, к оплате: <b>{price(new_amount, cfg.currency)}</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="➡️ К оплате", callback_data=f"order:show:{order_id}")
         ]]),
     )
-    await notify_admins(message.bot, cfg,
+    await notify_admins(bot, cfg,
                         f"🎟 Промокод <code>{esc(code)}</code> применён пользователем "
                         f"<code>{message.from_user.id}</code> (заказ #{order_id})")
 
@@ -739,7 +771,8 @@ async def cb_orders_history(call: CallbackQuery, db: Database, cfg: Config) -> N
 # Поддержка
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "menu:support")
-async def cb_support(call: CallbackQuery, db: Database, cfg: Config) -> None:
+async def cb_support(call: CallbackQuery, db: Database, cfg: Config, state: FSMContext) -> None:
+    await state.clear()  # эта кнопка — цель «Отмены» шагов ввода
     ticket = await db.open_ticket(call.from_user.id)
     text = (
         "🆘 <b>Поддержка</b>\n\n"
@@ -762,27 +795,29 @@ async def cb_faq(call: CallbackQuery) -> None:
 async def cb_support_new(call: CallbackQuery, state: FSMContext, db: Database) -> None:
     ticket = await db.open_ticket(call.from_user.id)
     if ticket is not None:
-        await call.message.answer(f"💬 Продолжаем обращение #{ticket['id']}. Напишите сообщение:")
         await state.update_data(ticket_id=ticket["id"])
         await state.set_state(TicketStates.reply)
+        await _prompt_window(call, state, f"💬 Продолжаем обращение #{ticket['id']}. Напишите сообщение:")
         await call.answer()
         return
     await state.set_state(TicketStates.subject)
-    await call.message.answer("✍️ Кратко опишите тему обращения (например: «Не работает на iPhone»):",
-                              reply_markup=cancel_kb("menu:support"))
+    await _prompt_window(call, state, "✍️ Кратко опишите тему обращения (например: «Не работает на iPhone»):",
+                         cancel_kb("menu:support"))
     await call.answer()
 
 
 @router.message(TicketStates.subject)
 async def msg_ticket_subject(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot) -> None:
+    window_id = (await state.get_data()).get(UI_WINDOW_KEY)
     subject = (message.text or "").strip()[:100]
     if not subject:
-        await message.answer("Тема не может быть пустой, попробуйте снова.")
+        await _apply_window(bot, message.chat.id, window_id, "Тема не может быть пустой, попробуйте снова.")
         return
     ticket_id = await db.create_ticket(message.from_user.id, subject)
     await state.update_data(ticket_id=ticket_id)
     await state.set_state(TicketStates.message)
-    await message.answer("📝 Теперь опишите проблему подробнее (можно приложить ссылку или скриншот):")
+    await _apply_window(bot, message.chat.id, window_id,
+                        "📝 Теперь опишите проблему подробнее (можно приложить ссылку или скриншот):")
     await notify_admins(
         bot, cfg,
         f"🧾 <b>Новое обращение #{ticket_id}</b>\nПользователь: <code>{message.from_user.id}</code>\n"
@@ -794,14 +829,17 @@ async def msg_ticket_subject(message: Message, state: FSMContext, db: Database, 
 async def msg_ticket_message(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot) -> None:
     data = await state.get_data()
     ticket_id = int(data.get("ticket_id") or 0)
+    window_id = data.get(UI_WINDOW_KEY)
     await state.clear()
     if not ticket_id:
-        await message.answer("Обращение не найдено, начните заново.", reply_markup=back_kb("menu:support"))
+        await _apply_window(bot, message.chat.id, window_id,
+                            "Обращение не найдено, начните заново.", back_kb("menu:support"))
         return
     text = message.text or message.caption or "[вложение]"
     await db.add_ticket_message(ticket_id, False, text)
-    await message.answer(f"✅ Сообщение отправлено в поддержку (обращение #{ticket_id}). Ответ придёт сюда же.",
-                         reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+    await _apply_window(bot, message.chat.id, window_id,
+                        f"✅ Сообщение отправлено в поддержку (обращение #{ticket_id}). Ответ придёт сюда же.",
+                        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
     await notify_admins(
         bot, cfg,
         f"💬 <b>Обращение #{ticket_id}</b> — новое сообщение от <code>{message.from_user.id}</code>:\n{esc(text)}",
@@ -817,7 +855,7 @@ async def cb_ticket_reply(call: CallbackQuery, state: FSMContext, db: Database) 
         return
     await state.update_data(ticket_id=ticket_id)
     await state.set_state(TicketStates.reply)
-    await call.message.answer("✍️ Напишите сообщение в поддержку:")
+    await _prompt_window(call, state, "✍️ Напишите сообщение в поддержку:")
     await call.answer()
 
 
@@ -825,10 +863,12 @@ async def cb_ticket_reply(call: CallbackQuery, state: FSMContext, db: Database) 
 async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot) -> None:
     data = await state.get_data()
     ticket_id = int(data.get("ticket_id") or 0)
+    window_id = data.get(UI_WINDOW_KEY)
     await state.clear()
     text = message.text or message.caption or "[вложение]"
     await db.add_ticket_message(ticket_id, False, text)
-    await message.answer("✅ Отправлено. Ответ придёт в этот чат.", reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+    await _apply_window(bot, message.chat.id, window_id, "✅ Отправлено. Ответ придёт в этот чат.",
+                        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
     await notify_admins(bot, cfg, f"💬 <b>Обращение #{ticket_id}</b>: сообщение от <code>{message.from_user.id}</code>\n{esc(text)}")
 
 
