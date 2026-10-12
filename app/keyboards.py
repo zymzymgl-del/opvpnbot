@@ -145,7 +145,6 @@ def admin_kb(stats: dict, tickets_open: int = 0) -> InlineKeyboardMarkup:
         ("💰 Заказы", "adm:orders", stats.get("orders_pending", 0)),
         ("👥 Пользователи", "adm:users", 0),
         ("🔗 QR для клиента", "adm:claim", 0),
-        ("🔑 Ключи и тарифы", "adm:keys", 0),
         ("🎟 Промокоды", "adm:promos", 0),
         ("📢 Рассылка", "adm:broadcast", 0),
         ("🧾 Тикеты", "adm:tickets", tickets_open),
@@ -177,17 +176,6 @@ def admin_ticket_kb(ticket_id: int) -> InlineKeyboardMarkup:
     builder.button(text="✉️ Ответить", callback_data=f"adm:ticket:reply:{ticket_id}")
     builder.button(text="✅ Закрыть", callback_data=f"adm:ticket:close:{ticket_id}")
     builder.adjust(2)
-    return builder.as_markup()
-
-
-def admin_keys_kb(pool: dict) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить ключи", callback_data="adm:keys:add")
-    builder.button(text="📋 Список пула", callback_data="adm:keys:list:0")
-    builder.button(text=f"🗑 Очистить использованные ({pool.get('used', 0)})", callback_data="adm:keys:clear")
-    builder.button(text="🧪 Проверить панель", callback_data="adm:paneltest")
-    builder.button(text="◀️ Назад", callback_data="adm:panel")
-    builder.adjust(1)
     return builder.as_markup()
 
 

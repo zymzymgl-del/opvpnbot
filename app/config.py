@@ -196,7 +196,7 @@ def load_config() -> Config:
         yookassa_return_url=_str("YOOKASSA_RETURN_URL", "https://t.me"),
         yookassa_test=_bool("YOOKASSA_TEST", False),
         payments_proxy=_str("PAYMENTS_PROXY"),
-        panel=_str("VPN_PANEL", "pool").lower(),
+        panel=_str("VPN_PANEL", "xui").lower(),
         xui_url=_str("XUI_URL").rstrip("/"),
         xui_username=_str("XUI_USERNAME", "admin"),
         xui_password=_str("XUI_PASSWORD"),
@@ -236,8 +236,8 @@ def validate(cfg: Config) -> list[str]:
         problems.append("BOT_TOKEN не задан — получите токен у @BotFather.")
     if not cfg.admin_ids:
         problems.append("ADMIN_IDS не задан — укажите свой Telegram ID (узнать: @userinfobot).")
-    if cfg.panel not in {"pool", "xui"}:
-        problems.append(f"VPN_PANEL={cfg.panel!r} неизвестен. Доступно: pool, xui.")
+    if cfg.panel != "xui":
+        problems.append(f"VPN_PANEL={cfg.panel!r} неизвестен. Доступен только режим: xui.")
     if cfg.panel == "xui":
         if not cfg.xui_url:
             problems.append("VPN_PANEL=xui, но не задан XUI_URL.")

@@ -18,7 +18,7 @@ app/utils.py               — форматирование, QR, время (б�
 app/middlewares.py         — троттлинг, регистрация/бан, обязательный канал, ошибки
 app/handlers/user.py       — пользовательский Router (магазин, оплата, ключи, профиль, тикеты)
 app/handlers/admin.py      — админский Router (фильтр IsAdmin на уровне роутера)
-app/services/panels.py     — выдача ключей: BasePanel → PoolPanel / XuiPanel
+app/services/panels.py     — выдача ключей: BasePanel → XuiPanel (3x-ui)
 app/services/payments.py   — YooKassaClient (REST v3: создание платежа, проверка статуса)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
@@ -48,7 +48,6 @@ requirements-dev.txt       — инструменты разработки (ruff
 | `plans` | витрина | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order |
 | `orders` | заказы | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
 | `subscriptions` | выданные ключи | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d») |
-| `key_pool` | пул конфигов | content UNIQUE, plan_code (NULL = любой), is_used/used_by |
 | `promos`, `promo_uses` | промокоды | discount_type percent/fixed, max_uses, expires_at |
 | `tickets`, `ticket_messages` | поддержка | status open/closed, from_admin |
 | `payments_log` | история денег | user_id, amount, method, kind, note |
@@ -61,7 +60,6 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 `BasePanel` — контракт: `create_client / extend_client / set_enabled / delete_client / health / close`. Возвращает `IssuedKey(vpn_key, sub_url, panel, panel_username)`.
 
-* **PoolPanel** — выдаёт готовый конфиг из `key_pool` (приоритет: под тариф → plan_code IS NULL → любой свободный). Продление — только в БД.
 * **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
 * Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
 
@@ -79,8 +77,8 @@ requirements-dev.txt       — инструменты разработки (ruff
 3. **Клиента продлить не удалось** (например, удалён в панели: `extend_client` вернул
    `False`) → создаётся новый клиент (`create_client`).
 
-Так повторная покупка после истечения возвращает пользователю **тот же конфиг**
-(в `pool` — тот же ключ), а не плодит нового клиента в панели. Статусы подписки:
+Так повторная покупка после истечения возвращает пользователю **тот же конфиг**,
+а не плодит нового клиента в панели. Статусы подписки:
 `active` → `expired` (истечение в `process_expired`) → снова `active` при возобновлении;
 `disabled` — админский отзыв (`adm:user:wipe`, клиент удаляется в панели).
 

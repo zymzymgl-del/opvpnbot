@@ -3,7 +3,7 @@
 
 Запуск:  python tools/selftest.py
 
-Проверяет: инициализацию БД, выдачу ключей из пула, продление, оплату заказа,
+Проверяет: инициализацию БД, выдачу ключей через панель (заглушка), продление, оплату заказа,
 промокоды, напоминания, отключение истёкших подписок, сборку ссылок 3x-ui
 и валидацию конфигурации.
 """
@@ -27,7 +27,9 @@ os.environ.update({
     "BOT_TOKEN": "123456:TEST-TOKEN",
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "test.sqlite3"),
-    "VPN_PANEL": "pool",
+    "VPN_PANEL": "xui",
+    "XUI_URL": "http://127.0.0.1:2053",
+    "XUI_API_TOKEN": "test-token",
     "PAYMENT_METHODS": "yookassa",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "2",
@@ -41,7 +43,7 @@ from app.runtime import runtime as rt  # noqa: E402
 from app.services.panels import (  # noqa: E402
     BasePanel,
     ClaimedClient,
-    PoolPanel,
+    IssuedKey,
     XuiPanel,
     _as_dict,
     _build_link,
@@ -104,6 +106,39 @@ class FakeBot:
         return None
 
 
+class FakePanel(BasePanel):
+    """Заглушка панели 3x-ui: выдаёт синтетические ключи без сети."""
+
+    name = "xui"
+    supports_claim = False
+
+    def __init__(self) -> None:
+        self.counter = 0
+
+    async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
+                            plan_code: str) -> IssuedKey:
+        self.counter += 1
+        return IssuedKey(
+            vpn_key=f"vless://fake-{user_id}-{self.counter}@example.com:443#k",
+            sub_url=None,
+            panel=self.name,
+            panel_username=f"tg{user_id}",
+        )
+
+    async def extend_client(self, *, panel_username: str, days: int,
+                            devices: int | None = None, traffic_gb: int | None = None) -> bool:
+        return True
+
+    async def set_enabled(self, *, panel_username: str, enabled: bool) -> bool:
+        return True
+
+    async def delete_client(self, *, panel_username: str) -> bool:
+        return True
+
+    async def health(self) -> tuple[bool, str]:
+        return True, "заглушка"
+
+
 async def run() -> None:
     cfg = load_config()
     print("\n1. Конфигурация и БД")
@@ -112,6 +147,8 @@ async def run() -> None:
     db = Database(cfg.db_path)
     await db.connect()
     await rt.load(db, cfg)
+    fake_panel = FakePanel()
+    panels_mod._panel = fake_panel  # type: ignore[attr-defined]
     check("тарифы посеяны по умолчанию", len(await db.active_plans()) == 4)
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
@@ -120,13 +157,13 @@ async def run() -> None:
     await db.upsert_plan("3m", "3 месяца", 405, 90, 0, 3)
 
     bot = FakeBot()
-    print("\n2. Выдача и продление подписок (панель pool)")
+    print("\n2. Выдача и продление подписок (панель 3x-ui, заглушка)")
     await db.ensure_user(1001, "alice", "Алиса")
     await db.ensure_user(1002, "bob", "Боб")
-    await db.add_keys([f"vless://test-key-{i}@example.com:443#test{i}" for i in range(3)], plan_code="1m")
     sub = await grant_subscription(bot, cfg, db, 1001, "1m")
     check("подписка создана", sub is not None and sub["status"] == "active")
-    check("ключ взят из пула", "vless://test-key" in (sub["vpn_key"] or ""), sub["vpn_key"] or "")
+    check("ключ выдан панелью", (sub["vpn_key"] or "").startswith("vless://fake-"), sub["vpn_key"] or "")
+    check("панель подписки — xui", sub["panel"] == "xui", str(sub["panel"]))
     check("срок = 30 дней", 29 <= (from_iso(sub["expires_at"]) - utcnow()).days + 1 <= 30)
     check("пользователю отправлена карточка", "VPN готов" in bot.all_text_for(1001))
     check("QR отдельным сообщением не отправляется", 1001 not in bot.photos)
@@ -140,7 +177,7 @@ async def run() -> None:
     check("продление: есть кнопки «Моя подписка» и «В меню»",
           {"🔑 Моя подписка", "🏠 В меню"} <= renew_buttons, str(renew_buttons))
     check("ключ при продлении не изменился", extended["vpn_key"] == sub["vpn_key"])
-    check("в пуле осталось 2 свободных ключа", (await db.pool_stats())["free"] == 2)
+    check("клиент панели при продлении тот же", extended["panel_username"] == sub["panel_username"])
 
     print("\n2b. Возобновление после истечения (тот же клиент)")
     await db.update_subscription(int(sub["id"]), status="expired",
@@ -154,11 +191,10 @@ async def run() -> None:
           (from_iso(revived["expires_at"]) - utcnow()).days >= 88,
           str((from_iso(revived["expires_at"]) - utcnow()).days))
     check("новых подписок не появилось", len(await db.user_subscriptions(1001)) == 1)
-    check("новый ключ из пула не потрачен", (await db.pool_stats())["free"] == 2)
 
     print("\n3. Пробный период")
     trial = await grant_subscription(bot, cfg, db, 1002, "trial")
-    check("пробная подписка выдана", trial is not None and trial["panel"] == "pool")
+    check("пробная подписка выдана", trial is not None and trial["panel"] == "xui")
     trial_days = (from_iso(trial["expires_at"]) - utcnow()).days
     check("пробный срок из runtime (2 дня)", trial_days in (1, 2), str(trial_days))
     upgrade = await grant_subscription(bot, cfg, db, 1002, "1m")
@@ -251,8 +287,6 @@ async def run() -> None:
     check("trojan ссылка собрана", trojan_link.startswith("trojan://pass123@"), trojan_link)
 
     print("\n8. Инициализация панелей")
-    xui = XuiPanel(cfg)
-    check("XuiPanel создан (pool-конфиг подставляется)", xui.base == "")
     os.environ["XUI_URL"] = "http://127.0.0.1:2053/secretpath"
     os.environ["XUI_USERNAME"] = "admin"
     os.environ["XUI_PASSWORD"] = "pass"
@@ -273,7 +307,7 @@ async def run() -> None:
         {"protocol": "trojan", "streamSettings": '{"network": "tcp", "security": "tls"}'},
     ]))
     panel = get_panel(cfg, db)
-    check("фабрика возвращает PoolPanel", isinstance(panel, PoolPanel))
+    check("фабрика возвращает панель 3x-ui (заглушка)", panel is fake_panel)
 
     print("\n8b. Совместимость форм inbound (классика/новая схема clients)")
     check("_as_dict читает JSON-строку streamSettings", _as_dict('{"security": "reality"}') == {"security": "reality"})
@@ -380,8 +414,6 @@ async def run() -> None:
     print("\n12. Конкурентность и идемпотентность выдачи")
     # 12a. Двойное завершение одного заказа: только один вызов "захватывает" pending -> paid
     await db.ensure_user(5001, "carol", "Кэрол")
-    await db.add_keys(["vless://race-key-1@example.com:443#race1",
-                       "vless://race-key-2@example.com:443#race2"], plan_code="1m")
     race_order = await db.create_order(5001, "1m", 150, 150, None, "yookassa", "subscription")
     results = await asyncio.gather(*(complete_order(bot, cfg, db, race_order) for _ in range(5)))
     order_5001 = await db.get_order(race_order)
@@ -392,17 +424,7 @@ async def run() -> None:
     check("подписка выдана ровно один раз", len(subs_5001) == 1, str(len(subs_5001)))
     check("платёж зафиксирован ровно один раз", len(pays_5001) == 1, str(len(pays_5001)))
 
-    # 12b. Параллельный take_key: два заказа не могут получить один и тот же ключ
-    await db.ensure_user(5002, "dave", "Дейв")
-    await db.ensure_user(5003, "eve", "Ева")
-    await db.add_keys(["vless://dup-a@example.com:443#dupa",
-                       "vless://dup-b@example.com:443#dupb"], plan_code="3m")
-    keys = await asyncio.gather(db.take_key("3m", 5002), db.take_key("3m", 5003))
-    values = [k["content"] for k in keys if k is not None]
-    check("параллельный take_key вернул оба ключа", len(values) == 2, str(values))
-    check("ключи не повторяются", len(set(values)) == 2, str(values))
-
-    # 12c. Промокод: лимит max_uses не превышается при параллельной активации
+    # 12b. Промокод: лимит max_uses не превышается при параллельной активации
     await db.create_promo("RACE50", "fixed", 50, max_uses=2, expires_at=None)
     for uid, name in ((5005, "gina"), (5006, "hugo"), (5007, "ivan")):
         await db.ensure_user(uid, name, name)
@@ -418,13 +440,13 @@ async def run() -> None:
           ok_count == 2 and used_total == 2 and uses_rows == 2,
           f"ok={ok_count}, used={used_total}, rows={uses_rows}")
 
-    # 12d. Промокод: повторная активация тем же пользователем (даже параллельно) отклонена
+    # 12c. Промокод: повторная активация тем же пользователем (даже параллельно) отклонена
     winner = next(uid for uid, (ok, _r, _row) in zip((5005, 5006, 5007), reserved) if ok)
     twice = await asyncio.gather(db.reserve_promo("RACE50", winner), db.reserve_promo("RACE50", winner))
     check("промокод: повторная активация тем же пользователем отклонена",
           not any(ok for ok, _r, _row in twice))
 
-    # 12e. release_promo освобождает лимит для повторного использования
+    # 12d. release_promo освобождает лимит для повторного использования
     await db.release_promo("RACE50", winner)
     used_after_release = int(await db.scalar("SELECT used FROM promos WHERE code = 'RACE50'"))
     check("промокод: release уменьшает счётчик", used_after_release == 1, str(used_after_release))

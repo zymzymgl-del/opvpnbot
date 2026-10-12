@@ -1,6 +1,6 @@
 """Слой хранения: SQLite через aiosqlite.
 
-В базе живут: пользователи, тарифы, заказы, подписки, пул ключей, промокоды,
+В базе живут: пользователи, тарифы, заказы, подписки, промокоды,
 тикеты поддержки, история платежей, рассылки и настройки.
 """
 
@@ -71,17 +71,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_subs_status ON subscriptions(status, expires_at);
-
-CREATE TABLE IF NOT EXISTS key_pool (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    content         TEXT NOT NULL UNIQUE,
-    plan_code       TEXT,
-    title           TEXT,
-    is_used         INTEGER NOT NULL DEFAULT 0,
-    used_by         INTEGER,
-    used_at         TEXT,
-    added_at        TEXT NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS promos (
     code            TEXT PRIMARY KEY,
@@ -534,70 +523,6 @@ class Database:
         return await self.fetchall(
             "SELECT * FROM subscriptions WHERE status = 'active' AND expires_at <= ?", (to_iso(utcnow()),)
         )
-
-    # --- key pool ---------------------------------------------------------
-    async def add_keys(self, keys: Iterable[str], plan_code: str | None = None, title: str = "") -> int:
-        added = 0
-        for raw in keys:
-            key = raw.strip()
-            if not key:
-                continue
-            try:
-                await self.execute(
-                    "INSERT INTO key_pool(content, plan_code, title, added_at) VALUES (?, ?, ?, ?)",
-                    (key, plan_code or None, title, to_iso(utcnow())),
-                )
-                added += 1
-            except aiosqlite.IntegrityError:
-                continue
-        return added
-
-    async def take_key(self, plan_code: str | None, user_id: int) -> Optional[aiosqlite.Row]:
-        """Берёт ключ из пула: сначала под конкретный тариф, затем «для любого»,
-        затем любой свободный (нужно для пробного периода и нестандартных тарифов).
-
-        Выбор и пометка «использован» — один атомарный UPDATE с RETURNING,
-        поэтому два параллельных заказа не могут получить один и тот же конфиг.
-        """
-        now = to_iso(utcnow())
-        statements: list[tuple[str, tuple]] = []
-        if plan_code:
-            statements.append((
-                "UPDATE key_pool SET is_used = 1, used_by = ?, used_at = ? "
-                "WHERE id = (SELECT id FROM key_pool WHERE is_used = 0 AND plan_code = ? "
-                "ORDER BY id LIMIT 1) RETURNING *",
-                (user_id, now, plan_code),
-            ))
-        statements.append((
-            "UPDATE key_pool SET is_used = 1, used_by = ?, used_at = ? "
-            "WHERE id = (SELECT id FROM key_pool WHERE is_used = 0 AND plan_code IS NULL "
-            "ORDER BY id LIMIT 1) RETURNING *",
-            (user_id, now),
-        ))
-        statements.append((
-            "UPDATE key_pool SET is_used = 1, used_by = ?, used_at = ? "
-            "WHERE id = (SELECT id FROM key_pool WHERE is_used = 0 ORDER BY id LIMIT 1) RETURNING *",
-            (user_id, now),
-        ))
-        async with self._lock:
-            for sql, args in statements:
-                cur = await self.conn.execute(sql, args)
-                row = await cur.fetchone()
-                await self.conn.commit()
-                if row is not None:
-                    return row
-        return None
-
-    async def pool_stats(self) -> dict[str, int]:
-        free = int(await self.scalar("SELECT COUNT(*) FROM key_pool WHERE is_used = 0"))
-        used = int(await self.scalar("SELECT COUNT(*) FROM key_pool WHERE is_used = 1"))
-        return {"free": free, "used": used, "total": free + used}
-
-    async def clear_used_keys(self) -> int:
-        row = await self.fetchone("SELECT COUNT(*) AS c FROM key_pool WHERE is_used = 1")
-        count = int(row["c"]) if row else 0
-        await self.execute("DELETE FROM key_pool WHERE is_used = 1")
-        return count
 
     # --- promos ------------------------------------------------------------
     async def create_promo(self, code: str, discount_type: str, value: int, max_uses: int,

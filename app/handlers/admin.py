@@ -1,4 +1,4 @@
-"""Админ-панель: заказы, ключи, пользователи, промокоды, рассылка, тикеты, настройки."""
+"""Админ-панель: заказы, пользователи, промокоды, рассылка, тикеты, настройки."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from app import __author__, __author_url__, __repo__, __version__
 from app.config import Config
 from app.db import Database, to_iso, utcnow
 from app.keyboards import (
-    admin_keys_kb,
     admin_kb,
     admin_order_kb,
     admin_ticket_kb,
@@ -58,8 +57,6 @@ router.callback_query.filter(IsAdmin())
 
 
 class AdminStates(StatesGroup):
-    keys_add = State()
-    keys_plan = State()
     claim_lookup = State()
     promo_code = State()
     promo_type = State()
@@ -80,7 +77,6 @@ class AdminStates(StatesGroup):
 # ---------------------------------------------------------------------------
 async def _panel_text(db: Database, cfg: Config) -> str:
     stats = await db.stats()
-    pool = await db.pool_stats()
     return (
         "⚙️ <b>Админ-панель</b>\n\n"
         f"👥 Пользователей: <b>{stats['users_total']}</b> (+{stats['users_day']} за сутки)\n"
@@ -88,11 +84,10 @@ async def _panel_text(db: Database, cfg: Config) -> str:
         f"⏳ Заказов в ожидании: <b>{stats['orders_pending']}</b>\n"
         f"💰 Выручка за сутки: <b>{price(stats['revenue_day'], cfg.currency)}</b> "
         f"| всего: <b>{price(stats['revenue_total'], cfg.currency)}</b>\n"
-        f"🔑 Пул ключей: свободно <b>{pool['free']}</b> из {pool['total']}\n"
         f"🧾 Открытых тикетов: <b>{stats['tickets_open']}</b>\n\n"
         f"Панель выдачи: <code>{cfg.panel}</code> · оплата: <code>{', '.join(cfg.payment_methods)}</code>\n\n"
-        "💡 <i>Заказы — подтвердить оплаты · Ключи и тарифы — пул, цены и сроки · "
-        "Настройки — триал, тарифы · Бэкап — копия базы файлом.</i>"
+        "💡 <i>Заказы — подтвердить оплаты · Тарифы и триал — в Настройках · "
+        "Бэкап — копия базы файлом.</i>"
     )
 
 
@@ -224,105 +219,6 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
         await safe_send(bot, int(order["user_id"]),
                         f"❌ Заказ #{order_id} отклонён администратором. Напишите в поддержку, если это ошибка.")
         await call.message.edit_text(f"❌ Заказ #{order_id} отклонён.")
-    await call.answer()
-
-
-# ---------------------------------------------------------------------------
-# Ключи (пул / панель)
-# ---------------------------------------------------------------------------
-@router.callback_query(F.data == "adm:keys")
-async def cb_keys(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    pool = await db.pool_stats()
-    mode = {
-        "pool": "пул готовых конфигов",
-        "xui": "панель 3x-ui (клиент создаётся автоматически)",
-    }.get(cfg.panel, cfg.panel)
-    text = (
-        f"🔑 <b>Ключи</b>\n\nРежим: <b>{mode}</b>\n"
-        f"Свободных ключей в пуле: <b>{pool['free']}</b> | использовано: {pool['used']}\n"
-    )
-    if cfg.panel == "pool" and pool["free"] == 0:
-        text += "\n⚠️ Пул пуст — новые покупки не смогут быть выданы. Добавьте конфиги!"
-    await call.message.edit_text(text, reply_markup=admin_keys_kb(pool))
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm:keys:add")
-async def cb_keys_add(call: CallbackQuery, state: FSMContext, db: Database) -> None:
-    plans = await db.active_plans()
-    kb_rows = [[InlineKeyboardButton(text="🌍 Для любого тарифа", callback_data="adm:keys:plan:any")]]
-    for plan in plans:
-        kb_rows.append([InlineKeyboardButton(text=plan["title"], callback_data=f"adm:keys:plan:{plan['code']}")])
-    kb_rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data="adm:keys")])
-    await call.message.answer("К какому тарифу привязать ключи?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm:keys:plan:"))
-async def cb_keys_plan(call: CallbackQuery, state: FSMContext) -> None:
-    plan_code = call.data.rsplit(":", 1)[1]
-    await state.update_data(keys_plan=None if plan_code == "any" else plan_code)
-    await state.set_state(AdminStates.keys_add)
-    await call.message.answer(
-        "Отправьте ключи/ссылки — по одному в строке. Можно вставить сразу список:\n\n"
-        "<code>vless://...#user-1\nvless://...#user-2</code>",
-        reply_markup=cancel_kb("adm:keys"),
-    )
-    await call.answer()
-
-
-@router.message(AdminStates.keys_add)
-async def msg_keys_add(message: Message, state: FSMContext, db: Database) -> None:
-    data = await state.get_data()
-    plan_code = data.get("keys_plan")
-    await state.clear()
-    lines = [line.strip() for line in (message.text or "").splitlines() if line.strip()]
-    if not lines:
-        await message.answer("Пустое сообщение — отправьте ключи построчно.")
-        return
-    added = await db.add_keys(lines, plan_code)
-    pool = await db.pool_stats()
-    await message.answer(
-        f"✅ Добавлено ключей: <b>{added}</b> (пропущено дублей: {len(lines) - added}).\n"
-        f"Свободно в пуле: <b>{pool['free']}</b>",
-        reply_markup=admin_keys_kb(pool),
-    )
-
-
-@router.callback_query(F.data.startswith("adm:keys:list:"))
-async def cb_keys_list(call: CallbackQuery, db: Database) -> None:
-    page = int(call.data.rsplit(":", 1)[1])
-    rows = await db.fetchall(
-        "SELECT * FROM key_pool ORDER BY is_used, id LIMIT ? OFFSET ?", (PAGE_SIZE, page * PAGE_SIZE)
-    )
-    total = int(await db.scalar("SELECT COUNT(*) FROM key_pool"))
-    if not rows:
-        await call.answer("Пул пуст.", show_alert=True)
-        return
-    lines = [f"📋 <b>Пул ключей</b> (стр. {page + 1}/{(total + PAGE_SIZE - 1) // PAGE_SIZE})\n"]
-    for row in rows:
-        state = "🟢 свободен" if not row["is_used"] else f"🔴 выдан {row['used_by']}"
-        tail = (row["content"] or "")[-28:]
-        lines.append(f"#{row['id']} · {esc(row['plan_code'] or 'любой')} · {state}\n<code>…{esc(tail)}</code>")
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:keys:list:{page - 1}"))
-    if (page + 1) * PAGE_SIZE < total:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:keys:list:{page + 1}"))
-    keyboard_rows = [nav] if nav else []
-    keyboard_rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:keys")])
-    await call.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm:keys:clear")
-async def cb_keys_clear(call: CallbackQuery, db: Database) -> None:
-    removed = await db.clear_used_keys()
-    pool = await db.pool_stats()
-    await call.message.edit_text(
-        f"🗑 Удалено использованных ключей: <b>{removed}</b>\nСвободно в пуле: <b>{pool['free']}</b>",
-        reply_markup=admin_keys_kb(pool),
-    )
     await call.answer()
 
 
@@ -878,13 +774,12 @@ async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, bo
 @router.callback_query(F.data == "adm:settings")
 async def cb_settings(call: CallbackQuery, db: Database, cfg: Config) -> None:
     plans = await db.all_plans()
-    pool = await db.pool_stats()
     text = (
         "🎛 <b>Настройки</b>\n\n"
         f"Панель выдачи: <code>{cfg.panel}</code>\n"
         f"Способы оплаты: <code>{', '.join(cfg.payment_methods)}</code>\n"
         f"Пробный период: {'включён, ' + str(rt.trial_days) + ' дн.' if rt.trial_enabled else 'выключен'}\n"
-        f"Тарифов: {len(plans)} | ключей в пуле: {pool['free']}\n\n"
+        f"Тарифов: {len(plans)}\n\n"
         "Значение пробного периода меняется на время работы бота "
         "(постоянное значение задаётся в .env)."
     )

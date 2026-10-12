@@ -1,7 +1,6 @@
-"""Выдача VPN-ключей: единый интерфейс для двух режимов.
+"""Выдача VPN-ключей через панель 3x-ui.
 
-* ``pool``    — готовые ключи/конфиги, заранее загруженные админом;
-* ``xui``     — панель 3x-ui (создание клиента через API, ссылка собирается сама).
+* ``xui`` — панель 3x-ui: клиент создаётся/продлевается через API, ссылка собирается сама.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 class PanelError(RuntimeError):
-    """Ошибка взаимодействия с панелью/пулом ключей."""
+    """Ошибка взаимодействия с панелью 3x-ui."""
 
 
 @dataclass
@@ -81,40 +80,6 @@ class BasePanel(ABC):
 
     async def close(self) -> None:
         return None
-
-
-# ---------------------------------------------------------------------------
-# Пул заранее загруженных ключей
-# ---------------------------------------------------------------------------
-class PoolPanel(BasePanel):
-    name = "pool"
-
-    def __init__(self, db: Database) -> None:
-        self.db = db
-
-    async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
-                            plan_code: str) -> IssuedKey:
-        row = await self.db.take_key(plan_code, user_id)
-        if row is None:
-            raise PanelError(
-                "Пул ключей пуст. Администратору нужно добавить конфиги: "
-                "Админка → 🔑 Ключи → ➕ Добавить ключи."
-            )
-        return IssuedKey(
-            vpn_key=row["content"],
-            sub_url=None,
-            panel=self.name,
-            panel_username=f"pool:{row['id']}",
-        )
-
-    async def extend_client(self, *, panel_username: str, days: int,
-                            devices: int | None = None, traffic_gb: int | None = None) -> bool:
-        # Ключ из пула остаётся тем же — продление живёт только в базе бота.
-        return True
-
-    async def health(self) -> tuple[bool, str]:
-        stats = await self.db.pool_stats()
-        return stats["free"] > 0, f"свободных ключей: {stats['free']} из {stats['total']}"
 
 
 # ---------------------------------------------------------------------------
@@ -689,12 +654,10 @@ _panel: BasePanel | None = None
 
 
 def get_panel(cfg: Config, db: Database) -> BasePanel:
+    """Синглтон панели 3x-ui (``db`` оставлен для совместимости сигнатуры)."""
     global _panel
     if _panel is None:
-        if cfg.panel == "xui":
-            _panel = XuiPanel(cfg)
-        else:
-            _panel = PoolPanel(db)
+        _panel = XuiPanel(cfg)
     return _panel
 
 
@@ -715,6 +678,6 @@ def subscription_payload(sub_row) -> dict:
 
 
 __all__ = [
-    "BasePanel", "PoolPanel", "XuiPanel", "PanelError", "IssuedKey", "ClaimedClient",
+    "BasePanel", "XuiPanel", "PanelError", "IssuedKey", "ClaimedClient",
     "get_panel", "close_panel", "to_iso",
 ]

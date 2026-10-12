@@ -24,7 +24,9 @@ os.environ.update({
     "BOT_TOKEN": "123456:TEST-TOKEN",
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "it.sqlite3"),
-    "VPN_PANEL": "pool",
+    "VPN_PANEL": "xui",
+    "XUI_URL": "http://127.0.0.1:2053",
+    "XUI_API_TOKEN": "test-token",
     "PAYMENT_METHODS": "yookassa",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "3",
@@ -132,13 +134,43 @@ async def run() -> None:
     db = Database(cfg.db_path)
     await db.connect()
     await rt.load(db, cfg)
-    await db.add_keys([f"vless://pool-key-{i}@srv:443#pool{i}" for i in range(5)])
     # Тест использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     await db.upsert_plan("1m", "1 месяц", 150, 30, 0, 2)
     await db.upsert_plan("3m", "3 месяца", 405, 90, 0, 3)
 
     bot = Bot(cfg.bot_token)
     install_stubs(bot)
+
+    import app.services.panels as panels_mod
+    from app.services.panels import BasePanel, IssuedKey
+
+    class FakePanel(BasePanel):
+        """Заглушка панели 3x-ui: выдаёт синтетические ключи без сети."""
+
+        name = "xui"
+        supports_claim = False
+
+        def __init__(self) -> None:
+            self.counter = 0
+
+        async def create_client(self, *, user_id, days, devices, traffic_gb, plan_code):
+            self.counter += 1
+            return IssuedKey(vpn_key=f"vless://fake-{user_id}-{self.counter}@srv:443#k",
+                             sub_url=None, panel=self.name, panel_username=f"tg{user_id}")
+
+        async def extend_client(self, *, panel_username, days, devices=None, traffic_gb=None):
+            return True
+
+        async def set_enabled(self, *, panel_username, enabled):
+            return True
+
+        async def delete_client(self, *, panel_username):
+            return True
+
+        async def health(self):
+            return True, "заглушка"
+
+    panels_mod._panel = FakePanel()
 
     class FakeYooKassa:
         """Заглушка ЮKassa: платёж создаётся, проверка всегда успешна."""
@@ -192,7 +224,7 @@ async def run() -> None:
     OUT.clear()
     await dp.feed_update(bot, make_callback(777, f"adm:order:approve:{order_id}", 6))
     sub = await db.active_subscription(555)
-    expect("подписка выдана и ключ из пула", sub is not None and "pool-key" in (sub["vpn_key"] or ""))
+    expect("подписка выдана панелью", sub is not None and "fake" in (sub["vpn_key"] or ""))
 
     # продление доступно только в окне за 3 дня до окончания
     OUT.clear()

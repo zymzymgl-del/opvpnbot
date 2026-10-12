@@ -169,7 +169,7 @@ collect_config() {
   ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa"
 
   printf '\n%s\n' "${c_blu}=== Выдача ключей ===${c_reset}"
-  ask_choice VPN_PANEL "Режим выдачи ключей" "pool" pool xui
+  VPN_PANEL="xui"
   case "$VPN_PANEL" in
     xui)
       ask_required XUI_URL "Адрес панели 3x-ui (вместе с путём, если изменён)"
@@ -186,7 +186,6 @@ collect_config() {
         info "Сгенерирован CLAIM_SECRET для подписи ссылок привязки."
       fi
       ;;
-    pool) : ;;
   esac
 
   case ",${PAYMENT_METHODS}," in
