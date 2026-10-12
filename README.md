@@ -171,7 +171,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 **Пользователю:** `/start` · `/menu` · `/help` · `/terms` · `/privacy`
 **Админу:** `/admin` · `/stats`
 
-## � Мониторинг и CI
+## Мониторинг и CI
 
 - **Healthcheck:** бот поднимает `GET /healthz` (по умолчанию `127.0.0.1:8081`), который проверяет доступность БД и отдаёт `200 {"ok": true}` или `503`. Укажите адрес в uptime-мониторе (healthchecks.io, UptimeRobot, Better Stack), чтобы получать алерт, если бот упал или завис. Для systemd — проксируйте через nginx; для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
 
