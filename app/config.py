@@ -139,6 +139,8 @@ class Config:
     xui_inbound_ids: tuple[int, ...]
     xui_public_host: str
     xui_sub_base: str
+    xui_verify_ssl: bool
+    xui_ca_file: str
 
     # --- Привязка существующих клиентов панели (только xui) ---
     claim_enabled: bool
@@ -210,6 +212,8 @@ def load_config() -> Config:
         xui_inbound_ids=_xui_inbound_ids(),
         xui_public_host=_str("XUI_PUBLIC_HOST"),
         xui_sub_base=_str("XUI_SUB_BASE").rstrip("/"),
+        xui_verify_ssl=_bool("XUI_VERIFY_SSL", True),
+        xui_ca_file=_str("XUI_CA_FILE"),
         claim_enabled=_bool("CLAIM_ENABLED", False),
         claim_secret=_str("CLAIM_SECRET"),
         claim_ttl_hours=max(1, _int("CLAIM_TTL_HOURS", 168)),
@@ -251,6 +255,10 @@ def validate(cfg: Config) -> list[str]:
             problems.append("VPN_PANEL=xui, но не задан XUI_URL.")
         if not (cfg.xui_api_token or (cfg.xui_username and cfg.xui_password)):
             problems.append("VPN_PANEL=xui: нужен XUI_API_TOKEN или XUI_USERNAME/XUI_PASSWORD.")
+        if cfg.xui_ca_file and not Path(cfg.xui_ca_file).is_file():
+            problems.append(
+                f"XUI_CA_FILE={cfg.xui_ca_file!r} — файл не найден (нужен PEM-сертификат CA)."
+            )
     if cfg.claim_enabled and not cfg.claim_secret:
         problems.append("CLAIM_ENABLED=true, но не задан CLAIM_SECRET — ссылки привязки нельзя подписать.")
     if cfg.claim_enabled and cfg.panel != "xui":

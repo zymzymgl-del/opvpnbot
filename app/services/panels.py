@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import secrets
+import ssl
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -100,12 +101,28 @@ class XuiPanel(BasePanel):
         self.inbound_id = cfg.xui_inbound_id
         self.public_host = cfg.xui_public_host
         self.sub_base = cfg.xui_sub_base
+        self.verify_ssl = bool(cfg.xui_verify_ssl)
+        self.ca_file = cfg.xui_ca_file or None
+        # ssl=False — проверка отключена явно (XUI_VERIFY_SSL=false); иначе SSLContext,
+        # проверяющий сертификат панели (системные CA или свой XUI_CA_FILE).
+        self.ssl_context: ssl.SSLContext | bool = self._make_ssl_context()
         self._session: Optional[aiohttp.ClientSession] = None
         self._logged_in = False
         # None — схема ещё не определена; True — /panel/api/clients/*, False — классические /inbounds/addClient.
         self._clients_api: bool | None = None
 
     # --- инфраструктура -------------------------------------------------
+    def _make_ssl_context(self) -> ssl.SSLContext | bool:
+        """Параметр ``ssl=`` для aiohttp: контекст проверки или False.
+
+        По умолчанию проверяем сертификат панели (системные доверенные CA).
+        Для self-signed панели укажите ``XUI_CA_FILE``; полностью отключить
+        проверку (небезопасно, MITM) можно только явным ``XUI_VERIFY_SSL=false``.
+        """
+        if not self.verify_ssl:
+            return False
+        return ssl.create_default_context(cafile=self.ca_file)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             jar = aiohttp.CookieJar(unsafe=True)
@@ -119,7 +136,7 @@ class XuiPanel(BasePanel):
         async with session.post(
             f"{self.base}/login",
             data={"username": self.username, "password": self.password},
-            ssl=False,
+            ssl=self.ssl_context,
         ) as resp:
             text = await resp.text()
         if resp.status >= 400 or '"success":true' not in text.replace(" ", ""):
@@ -134,7 +151,7 @@ class XuiPanel(BasePanel):
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         url = f"{self.base}/panel/api{path}"
-        kwargs: dict[str, Any] = {"headers": headers, "ssl": False}
+        kwargs: dict[str, Any] = {"headers": headers, "ssl": self.ssl_context}
         if payload is not None:
             kwargs["json"] = payload
         async with session.request(method, url, **kwargs) as resp:

@@ -61,7 +61,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 `BasePanel` — контракт: `create_client / extend_client / set_enabled / delete_client / health / close`. Возвращает `IssuedKey(vpn_key, sub_url, panel, panel_username)`.
 
-- **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
+- **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`). Проверка TLS-сертификата панели включена по умолчанию (`XUI_VERIFY_SSL`); для self-signed — свой CA через `XUI_CA_FILE`, полное отключение — только явным `XUI_VERIFY_SSL=false`.
 - Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
 
 Кастомная панель: наследник `BasePanel` + регистрация в `get_panel()`.

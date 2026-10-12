@@ -147,6 +147,12 @@ async def main() -> None:
     # --- проверка панели на старте ---
     try:
         panel = get_panel(cfg, db)
+        if cfg.panel == "xui":
+            log.info(
+                "3x-ui TLS: проверка сертификата %s%s",
+                "включена" if cfg.xui_verify_ssl else "ОТКЛЮЧЕНА (XUI_VERIFY_SSL=false)",
+                f", CA: {cfg.xui_ca_file}" if cfg.xui_ca_file else "",
+            )
         ok, message = await panel.health()
         log.info("Панель '%s': %s — %s", cfg.panel, "OK" if ok else "ПРОБЛЕМА", message)
         if not ok:

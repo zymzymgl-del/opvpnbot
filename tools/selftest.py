@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import os
 import sqlite3
+import ssl
 import sys
 import tempfile
 import time
@@ -150,6 +151,11 @@ async def run() -> None:
     fake_panel = FakePanel()
     panels_mod._panel = fake_panel  # type: ignore[attr-defined]
     check("тарифы посеяны по умолчанию", len(await db.active_plans()) == 4)
+
+    print("\n1b. 3x-ui: проверка TLS-сертификата")
+    check("TLS-проверка включена по умолчанию", isinstance(XuiPanel(cfg).ssl_context, ssl.SSLContext))
+    check("XUI_VERIFY_SSL=false отключает проверку",
+          XuiPanel(dataclasses.replace(cfg, xui_verify_ssl=False)).ssl_context is False)
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.

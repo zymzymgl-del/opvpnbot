@@ -122,6 +122,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | `BOT_TOKEN`                                        | Токен от [@BotFather](https://t.me/BotFather)                                                |
 | `ADMIN_IDS`                                        | Telegram ID админов через запятую ([@userinfobot](https://t.me/userinfobot))                 |
 | `VPN_PANEL`                                        | `xui`                                                                                        |
+| `XUI_VERIFY_SSL`, `XUI_CA_FILE`                    | Проверка TLS-сертификата панели (по умолчанию `true`); свой CA для self-signed |
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
 | `PAYMENT_METHODS`                                  | `yookassa`                                                                                   |
 | `TRIAL_ENABLED`, `TRIAL_DAYS`                      | Пробный период                                                                               |
