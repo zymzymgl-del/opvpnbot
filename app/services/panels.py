@@ -1,8 +1,7 @@
-"""Выдача VPN-ключей: единый интерфейс для трёх режимов.
+"""Выдача VPN-ключей: единый интерфейс для двух режимов.
 
 * ``pool``    — готовые ключи/конфиги, заранее загруженные админом;
-* ``xui``     — панель 3x-ui (создание клиента через API, ссылка собирается сама);
-* ``marzban`` — панель Marzban (создание пользователя, ссылка подписки от панели).
+* ``xui``     — панель 3x-ui (создание клиента через API, ссылка собирается сама).
 """
 
 from __future__ import annotations
@@ -684,142 +683,6 @@ def _build_link(inbound: dict, client: dict, host: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Marzban
-# ---------------------------------------------------------------------------
-class MarzbanPanel(BasePanel):
-    name = "marzban"
-
-    def __init__(self, cfg: Config) -> None:
-        self.base = cfg.marzban_url.rstrip("/")
-        self.username = cfg.marzban_username
-        self.password = cfg.marzban_password
-        self.proxies = json.loads(cfg.marzban_proxies_json)
-        self.inbounds = json.loads(cfg.marzban_inbounds_json)
-        self.verify_ssl = cfg.marzban_verify_ssl
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._token: str | None = None
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
-        return self._session
-
-    async def _auth(self) -> str:
-        if self._token:
-            return self._token
-        session = await self._get_session()
-        async with session.post(
-            f"{self.base}/api/admin/token",
-            data={"username": self.username, "password": self.password},
-            ssl=self.verify_ssl,
-        ) as resp:
-            raw = await resp.text()
-            if resp.status >= 400:
-                raise PanelError(f"Marzban: не удалось получить токен (HTTP {resp.status}): {raw[:200]}")
-            data = json.loads(raw)
-        token = data.get("access_token")
-        if not token:
-            raise PanelError("Marzban: ответ без access_token.")
-        self._token = token
-        return token
-
-    async def _api(self, path: str, *, method: str = "GET", payload: dict | None = None,
-                   retry: bool = True) -> dict:
-        session = await self._get_session()
-        token = await self._auth()
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        kwargs: dict[str, Any] = {"headers": headers, "ssl": self.verify_ssl}
-        if payload is not None:
-            kwargs["json"] = payload
-        async with session.request(method, f"{self.base}/api{path}", **kwargs) as resp:
-            raw = await resp.text()
-            if resp.status in (401, 403) and retry:
-                self._token = None
-                return await self._api(path, method=method, payload=payload, retry=False)
-            if resp.status == 409:
-                raise PanelError("Marzban: пользователь с таким именем уже существует.")
-            if resp.status >= 400:
-                raise PanelError(f"Marzban вернул HTTP {resp.status}: {raw[:200]}")
-        if not raw.strip():
-            return {}
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise PanelError(f"Marzban вернул не JSON: {raw[:200]}") from exc
-
-    async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
-
-    async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
-                            plan_code: str) -> IssuedKey:
-        username = f"tg{user_id}-{plan_code}-{int(time.time())}"
-        expire_ts = int(now_plus(days).timestamp())
-        payload: dict[str, Any] = {
-            "username": username,
-            "proxies": self.proxies,
-            "inbounds": self.inbounds,
-            "expire": expire_ts,
-            "data_limit": traffic_gb * 1024**3,
-            "data_limit_reset_strategy": "no_reset",
-            "status": "active",
-            "note": f"Telegram ID {user_id}",
-        }
-        data = await self._api("/user", method="POST", payload=payload)
-        links = data.get("links") or []
-        sub_url = data.get("subscription_url")
-        key = links[0] if links else (sub_url or "")
-        if not key:
-            raise PanelError("Marzban: пользователь создан, но панель не вернула ссылку.")
-        return IssuedKey(vpn_key=key, sub_url=sub_url, panel=self.name, panel_username=username)
-
-    async def extend_client(self, *, panel_username: str, days: int,
-                            devices: int | None = None, traffic_gb: int | None = None) -> bool:
-        try:
-            data = await self._api(f"/user/{panel_username}")
-        except PanelError:
-            return False
-        current_expire = int(data.get("expire") or 0)
-        base = max(current_expire, int(utcnow().timestamp())) if current_expire else int(utcnow().timestamp())
-        new_expire = base + days * 86400
-        payload: dict[str, Any] = {"expire": new_expire, "status": "active"}
-        if traffic_gb is not None and traffic_gb > 0:
-            payload["data_limit"] = traffic_gb * 1024**3
-        await self._api(
-            f"/user/{panel_username}",
-            method="PUT",
-            payload=payload,
-        )
-        return True
-
-    async def set_enabled(self, *, panel_username: str, enabled: bool) -> bool:
-        try:
-            await self._api(
-                f"/user/{panel_username}",
-                method="PUT",
-                payload={"status": "active" if enabled else "disabled"},
-            )
-            return True
-        except PanelError:
-            return False
-
-    async def delete_client(self, *, panel_username: str) -> bool:
-        try:
-            await self._api(f"/user/{panel_username}", method="DELETE")
-            return True
-        except PanelError:
-            return False
-
-    async def health(self) -> tuple[bool, str]:
-        try:
-            data = await self._api("/users?limit=1")
-        except PanelError as exc:
-            return False, str(exc)
-        total = data.get("total", "?")
-        return True, f"пользователей в панели: {total}"
-
-
-# ---------------------------------------------------------------------------
 # Фабрика
 # ---------------------------------------------------------------------------
 _panel: BasePanel | None = None
@@ -830,8 +693,6 @@ def get_panel(cfg: Config, db: Database) -> BasePanel:
     if _panel is None:
         if cfg.panel == "xui":
             _panel = XuiPanel(cfg)
-        elif cfg.panel == "marzban":
-            _panel = MarzbanPanel(cfg)
         else:
             _panel = PoolPanel(db)
     return _panel
@@ -854,6 +715,6 @@ def subscription_payload(sub_row) -> dict:
 
 
 __all__ = [
-    "BasePanel", "PoolPanel", "XuiPanel", "MarzbanPanel", "PanelError", "IssuedKey", "ClaimedClient",
+    "BasePanel", "PoolPanel", "XuiPanel", "PanelError", "IssuedKey", "ClaimedClient",
     "get_panel", "close_panel", "to_iso",
 ]

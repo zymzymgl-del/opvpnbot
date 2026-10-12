@@ -246,7 +246,6 @@ async def cb_keys(call: CallbackQuery, db: Database, cfg: Config) -> None:
     mode = {
         "pool": "пул готовых конфигов",
         "xui": "панель 3x-ui (клиент создаётся автоматически)",
-        "marzban": "панель Marzban (пользователь создаётся автоматически)",
     }.get(cfg.panel, cfg.panel)
     text = (
         f"🔑 <b>Ключи</b>\n\nРежим: <b>{mode}</b>\n"

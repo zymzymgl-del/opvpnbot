@@ -18,7 +18,7 @@ app/utils.py               — форматирование, QR, время (б�
 app/middlewares.py         — троттлинг, регистрация/бан, обязательный канал, ошибки
 app/handlers/user.py       — пользовательский Router (магазин, оплата, ключи, профиль, тикеты)
 app/handlers/admin.py      — админский Router (фильтр IsAdmin на уровне роутера)
-app/services/panels.py     — выдача ключей: BasePanel → PoolPanel / XuiPanel / MarzbanPanel
+app/services/panels.py     — выдача ключей: BasePanel → PoolPanel / XuiPanel
 app/services/payments.py   — YooKassaClient, YooMoneyClient, звёзды (send_invoice/refund)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
@@ -63,7 +63,6 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 * **PoolPanel** — выдаёт готовый конфиг из `key_pool` (приоритет: под тариф → plan_code IS NULL → любой свободный). Продление — только в БД.
 * **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
-* **MarzbanPanel** — OAuth-токен `/api/admin/token`, CRUD `/api/user`, повтор авторизации при 401/403, продление через PUT `expire/status`.
 * Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
 
 Кастомная панель: наследник `BasePanel` + регистрация в `get_panel()`.

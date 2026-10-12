@@ -13,7 +13,7 @@
 #      sudo bash install.sh --help
 #
 #  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
-#  VPN_PANEL, XUI_*, MARZBAN_*, YOOKASSA_*, YOOMONEY_*, WEBHOOK_*. Полный список —
+#  VPN_PANEL, XUI_*, YOOKASSA_*, YOOMONEY_*, WEBHOOK_*. Полный список —
 #  в .env.example. Пример:
 #      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 APP=... bash install.sh --yes
 # ============================================================================
@@ -169,7 +169,7 @@ collect_config() {
   ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa,yoomoney,stars,balance,manual"
 
   printf '\n%s\n' "${c_blu}=== Выдача ключей ===${c_reset}"
-  ask_choice VPN_PANEL "Режим выдачи ключей" "pool" pool xui marzban
+  ask_choice VPN_PANEL "Режим выдачи ключей" "pool" pool xui
   case "$VPN_PANEL" in
     xui)
       ask_required XUI_URL "Адрес панели 3x-ui (вместе с путём, если изменён)"
@@ -185,11 +185,6 @@ collect_config() {
         CLAIM_SECRET="$(gen_secret)"
         info "Сгенерирован CLAIM_SECRET для подписи ссылок привязки."
       fi
-      ;;
-    marzban)
-      ask_required MARZBAN_URL "Адрес панели Marzban"
-      ask MARZBAN_USERNAME "Логин Marzban" "admin"
-      ask_required MARZBAN_PASSWORD "Пароль Marzban"
       ;;
     pool) : ;;
   esac
@@ -247,11 +242,6 @@ write_env() {
         set_env "$env_file" CLAIM_ENABLED true
         put_env "$env_file" CLAIM_SECRET "${CLAIM_SECRET:-}"
       fi
-      ;;
-    marzban)
-      put_env "$env_file" MARZBAN_URL "${MARZBAN_URL:-}"
-      put_env "$env_file" MARZBAN_USERNAME "${MARZBAN_USERNAME:-}"
-      put_env "$env_file" MARZBAN_PASSWORD "${MARZBAN_PASSWORD:-}"
       ;;
   esac
 

@@ -151,12 +151,6 @@ class Config:
     xui_inbound_ids: tuple[int, ...]
     xui_public_host: str
     xui_sub_base: str
-    marzban_url: str
-    marzban_username: str
-    marzban_password: str
-    marzban_proxies_json: str
-    marzban_inbounds_json: str
-    marzban_verify_ssl: bool
 
     # --- Привязка существующих клиентов панели (только xui) ---
     claim_enabled: bool
@@ -261,12 +255,6 @@ def load_config() -> Config:
         xui_inbound_ids=_xui_inbound_ids(),
         xui_public_host=_str("XUI_PUBLIC_HOST"),
         xui_sub_base=_str("XUI_SUB_BASE").rstrip("/"),
-        marzban_url=_str("MARZBAN_URL").rstrip("/"),
-        marzban_username=_str("MARZBAN_USERNAME", "admin"),
-        marzban_password=_str("MARZBAN_PASSWORD"),
-        marzban_proxies_json=_str("MARZBAN_PROXIES_JSON", '{"vless": {"flow": "xtls-rprx-vision"}}'),
-        marzban_inbounds_json=_str("MARZBAN_INBOUNDS_JSON", '{"vless": ["VLESS TCP REALITY"]}'),
-        marzban_verify_ssl=_bool("MARZBAN_VERIFY_SSL", True),
         claim_enabled=_bool("CLAIM_ENABLED", False),
         claim_secret=_str("CLAIM_SECRET"),
         claim_ttl_hours=max(1, _int("CLAIM_TTL_HOURS", 168)),
@@ -298,18 +286,13 @@ def validate(cfg: Config) -> list[str]:
         problems.append("BOT_TOKEN не задан — получите токен у @BotFather.")
     if not cfg.admin_ids:
         problems.append("ADMIN_IDS не задан — укажите свой Telegram ID (узнать: @userinfobot).")
-    if cfg.panel not in {"pool", "xui", "marzban"}:
-        problems.append(f"VPN_PANEL={cfg.panel!r} неизвестен. Доступно: pool, xui, marzban.")
+    if cfg.panel not in {"pool", "xui"}:
+        problems.append(f"VPN_PANEL={cfg.panel!r} неизвестен. Доступно: pool, xui.")
     if cfg.panel == "xui":
         if not cfg.xui_url:
             problems.append("VPN_PANEL=xui, но не задан XUI_URL.")
         if not (cfg.xui_api_token or (cfg.xui_username and cfg.xui_password)):
             problems.append("VPN_PANEL=xui: нужен XUI_API_TOKEN или XUI_USERNAME/XUI_PASSWORD.")
-    if cfg.panel == "marzban":
-        if not cfg.marzban_url:
-            problems.append("VPN_PANEL=marzban, но не задан MARZBAN_URL.")
-        if not cfg.marzban_password:
-            problems.append("VPN_PANEL=marzban: не задан MARZBAN_PASSWORD.")
     if cfg.claim_enabled and not cfg.claim_secret:
         problems.append("CLAIM_ENABLED=true, но не задан CLAIM_SECRET — ссылки привязки нельзя подписать.")
     if cfg.claim_enabled and cfg.panel != "xui":

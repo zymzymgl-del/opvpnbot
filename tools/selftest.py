@@ -45,7 +45,6 @@ from app.runtime import runtime as rt  # noqa: E402
 from app.services.panels import (  # noqa: E402
     BasePanel,
     ClaimedClient,
-    MarzbanPanel,
     PoolPanel,
     XuiPanel,
     _as_dict,
@@ -299,8 +298,6 @@ async def run() -> None:
         {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
         {"protocol": "trojan", "streamSettings": '{"network": "tcp", "security": "tls"}'},
     ]))
-    mb = MarzbanPanel(cfg) if cfg.marzban_url else None
-    check("MarzbanPanel корректно требует настройки", mb is None or mb.base == "")
     panel = get_panel(cfg, db)
     check("фабрика возвращает PoolPanel", isinstance(panel, PoolPanel))
 
