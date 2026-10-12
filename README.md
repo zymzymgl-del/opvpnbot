@@ -247,13 +247,38 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 
 ## Мониторинг и CI
 
-- **Healthcheck:** бот поднимает `GET /healthz` (по умолчанию `127.0.0.1:8081`), который проверяет доступность БД и отдаёт `200 {"ok": true}` или `503`. Укажите адрес в uptime-мониторе (healthchecks.io, UptimeRobot, Better Stack), чтобы получать алерт, если бот упал или завис. Для systemd — проксируйте через nginx; для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
+### Healthcheck
 
-  ```bash
-  curl -fsS http://127.0.0.1:8081/healthz && echo OK
-  ```
+Бот поднимает `GET /healthz` (по умолчанию `127.0.0.1:8081`), который проверяет доступность БД и отдаёт `200 {"ok": true}` либо `503`. Это то, за чем следит внешний монитор.
 
-- **CI:** GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняет `ruff check` + `tools/selftest.py` + `tools/integration_test.py`, а также `pip-audit` (известные уязвимости в зависимостях) и проверку `requirements.lock.txt`.
+```bash
+curl -fsS http://127.0.0.1:8081/healthz && echo OK
+```
+
+Для systemd — проксируйте адрес через nginx (см. «🌐 nginx: вебхук ЮKassa и мониторинг»); для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
+
+### Уведомления о падении
+
+**Вариант 1 — UptimeRobot / healthchecks.io / Better Stack (проще, если есть домен).** Бесплатного тарифа хватает.
+
+1. Откройте `/healthz` через nginx (раздел «🌐 nginx…») и проверьте публичный адрес: `curl -fsS https://<домен>/healthz` → `{"ok": true}`.
+2. Зарегистрируйтесь на [uptimerobot.com](https://uptimerobot.com) → **Add New Monitor** → тип **HTTP(s)**.
+3. URL `https://<домен>/healthz`, интервал 5 минут; в **Alert Contacts** добавьте **Telegram** и/или email.
+4. Проверьте, что алерт действительно приходит: `sudo systemctl stop opvpnbot` → через ~5 минут придёт уведомление; `sudo systemctl start opvpnbot` → затем придёт «recovered».
+
+**Вариант 2 — cron + Telegram (бесплатно, адрес наружу не выставляется).** Проверяем локально и пишем в чат с ботом:
+
+```cron
+*/5 * * * * curl -fsS --max-time 5 http://127.0.0.1:8081/healthz >/dev/null \
+  || curl -fsS "https://api.telegram.org/bot<BOT_TOKEN>/sendMessage" \
+       -d chat_id=<ADMIN_ID> -d text="OPVPN: бот не отвечает"
+```
+
+> Мониторинг ничего не «чинит» — он лишь сообщает раньше, чем это заметят клиенты. Действия при сбоях — в `docs/RUNBOOK.md`.
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняет `ruff check` + `tools/selftest.py` + `tools/integration_test.py`, а также `pip-audit` (известные уязвимости в зависимостях) и проверку `requirements.lock.txt`.
 
 ## 🗂 Структура проекта
 
