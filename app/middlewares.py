@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from app.config import Config
 from app.db import Database
 from app.keyboards import subscription_check_kb
+from app.logctx import current_request_id, log_context
 from app.services.subs import notify_admins
 
 log = logging.getLogger(__name__)
@@ -142,16 +143,21 @@ class ErrorsMiddleware(BaseMiddleware):
         self.cfg = cfg
 
     async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:
-        try:
-            return await handler(event, data)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Ошибка обработки апдейта: %s", exc)
-            bot = data.get("bot")
-            if bot is not None:
-                await notify_admins(bot, self.cfg, f"⚠️ <b>Ошибка в боте</b>\n<code>{type(exc).__name__}: {exc}</code>")
-            if isinstance(event, CallbackQuery):
-                try:
-                    await event.answer("⚠️ Произошла ошибка, попробуйте ещё раз.", show_alert=True)
-                except Exception:
-                    pass
-            return None
+        with log_context():
+            try:
+                return await handler(event, data)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Ошибка обработки апдейта: %s", exc)
+                bot = data.get("bot")
+                if bot is not None:
+                    await notify_admins(
+                        bot, self.cfg,
+                        f"⚠️ <b>Ошибка в боте</b>\n<code>{type(exc).__name__}: {exc}</code>\n"
+                        f"rid: <code>{current_request_id()}</code>",
+                    )
+                if isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer("⚠️ Произошла ошибка, попробуйте ещё раз.", show_alert=True)
+                    except Exception:
+                        pass
+                return None

@@ -40,6 +40,7 @@ os.environ.update({
 from app.config import load_config, validate  # noqa: E402
 from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
 from app.keyboards import main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
+from app.logctx import current_request_id, log_context  # noqa: E402
 from app.runtime import runtime as rt  # noqa: E402
 from app.services.panels import (  # noqa: E402
     BasePanel,
@@ -156,6 +157,12 @@ async def run() -> None:
     check("TLS-проверка включена по умолчанию", isinstance(XuiPanel(cfg).ssl_context, ssl.SSLContext))
     check("XUI_VERIFY_SSL=false отключает проверку",
           XuiPanel(dataclasses.replace(cfg, xui_verify_ssl=False)).ssl_context is False)
+
+    print("\n1c. Контекст логирования (request_id)")
+    with log_context("test-rid") as rid:
+        check("request_id установлен внутри контекста",
+              rid == "test-rid" and current_request_id() == "test-rid")
+    check("request_id сброшен после выхода из контекста", current_request_id() == "-")
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.

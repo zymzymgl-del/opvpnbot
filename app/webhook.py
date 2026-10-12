@@ -22,6 +22,7 @@ from aiohttp import web
 
 from app.config import Config
 from app.db import Database
+from app.logctx import log_context
 from app.services.payments import PaymentError, YooKassaClient
 from app.services.subs import complete_order
 
@@ -68,6 +69,11 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
     """Поднимает aiohttp-сервер с маршрутом уведомлений. Возвращает AppRunner."""
 
     async def handle_yookassa(request: web.Request) -> web.Response:
+        # Один request_id на уведомление — связывает все его логи.
+        with log_context():
+            return await _process_yookassa(request)
+
+    async def _process_yookassa(request: web.Request) -> web.Response:
         remote = _client_ip(request, cfg.webhook_trust_proxy)
         if not _ip_allowed(remote):
             log.warning("Вебхук ЮKassa отклонён: IP %s вне разрешённых диапазонов", remote)

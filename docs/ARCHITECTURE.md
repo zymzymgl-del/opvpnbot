@@ -23,6 +23,7 @@ app/services/payments.py   — YooKassaClient (REST v3: создание пла�
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
 app/health.py              — aiohttp-сервер GET /healthz для внешнего мониторинга (uptime)
+app/logctx.py              — request_id (contextvars) для корреляции логов одного апдейта
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
 tools/integration_test.py  — маршрутизация апдейтов через Dispatcher.feed_update
 install.sh / deploy/       — установка на VPS: systemd-служба opvpnbot (install.sh --update/--uninstall/--no-service)

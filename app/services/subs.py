@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.config import Config
 from app.db import Database, from_iso, to_iso, utcnow
 from app.keyboards import subscription_kb
+from app.logctx import set_request_id
 from app.services.panels import PanelError, get_panel
 from app.runtime import runtime as rt
 from app.services.payments import YooKassaClient
@@ -415,6 +416,7 @@ async def run_db_backup(cfg: Config, db: Database) -> str | None:
 
 async def background_worker(bot: Bot, cfg: Config, db: Database, yk=None) -> None:
     """Единый цикл фоновых задач: напоминания, истечение, проверка платежей."""
+    set_request_id("worker")  # rid для всех логов воркера (отдельная задача — свой контекст)
     while True:
         try:
             await process_expired(bot, cfg, db)

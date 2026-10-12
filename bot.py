@@ -31,6 +31,7 @@ from app.db import Database
 from app.handlers import admin as admin_handlers
 from app.handlers import user as user_handlers
 from app.health import start_health_server
+from app.logctx import RequestIdFilter
 from app.middlewares import (
     ErrorsMiddleware,
     RequiredChannelMiddleware,
@@ -54,9 +55,12 @@ def setup_logging(level: str, log_file: str) -> None:
                                             encoding="utf-8"))
     except OSError as exc:  # нет прав на запись — работаем только в stdout
         print(f"Не удалось открыть лог-файл {log_file}: {exc}", file=sys.stderr)
+    rid_filter = RequestIdFilter()
+    for handler in handlers:
+        handler.addFilter(rid_filter)
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        format="%(asctime)s | %(levelname)-8s | %(name)s | rid=%(request_id)s | %(message)s",
         handlers=handlers,
         force=True,
     )
