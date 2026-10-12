@@ -148,7 +148,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
   curl -fsS http://127.0.0.1:8081/healthz && echo OK
   ```
 
-- **CI:** GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняет `ruff check` + `tools/selftest.py` + `tools/integration_test.py`.
+- **CI:** GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняет `ruff check` + `tools/selftest.py` + `tools/integration_test.py`, а также `pip-audit` (известные уязвимости в зависимостях) и проверку `requirements.lock.txt`.
 
 ## �🗂 Структура проекта
 
@@ -173,6 +173,7 @@ install.sh                 установщик на VPS одной команд
 Dockerfile                 образ для Docker
 docker-compose.yml         запуск бота в контейнере (том для data/)
 requirements-dev.txt       инструменты разработки (не обязательны)
+requirements.lock.txt      lock-файл (точные версии всех зависимостей)
 .env.example               образец конфигурации → копируется в .env
 deploy/opvpnbot.service    образец systemd-юнита
 docs/                      инструкции по панелям и оплате

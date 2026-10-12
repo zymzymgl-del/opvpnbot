@@ -32,6 +32,12 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Audit dependencies (pip-audit)
+        run: pip-audit -r requirements.txt
+
+      - name: Verify lock file installs (dry-run)
+        run: pip install --dry-run -r requirements.lock.txt
+
       - name: Self-test (логика без сети)
         env:
           PYTHONIOENCODING: utf-8

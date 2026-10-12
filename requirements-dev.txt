@@ -12,3 +12,9 @@ ruff>=0.6.0
 # и напрямую: `python tools/selftest.py`, `python tools/integration_test.py`).
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+
+# Аудит зависимостей на известные уязвимости (запускается в CI).
+pip-audit>=2.7
+
+# Генерация lock-файла (requirements.lock.txt): pip-compile requirements.txt
+pip-tools>=7.4
