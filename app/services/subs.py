@@ -1,4 +1,4 @@
-"""Бизнес-логика подписок: выдача, продление, истечение, напоминания, рефералы."""
+"""Бизнес-логика подписок: выдача, продление, истечение, напоминания."""
 
 from __future__ import annotations
 
@@ -229,32 +229,9 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
 # ---------------------------------------------------------------------------
 # Оплата заказа
 # ---------------------------------------------------------------------------
-async def apply_referral_bonus(bot: Bot, cfg: Config, db: Database, buyer_id: int, amount: int) -> None:
-    """Начисляет пригласившему процент от первого/каждого платежа приглашённого."""
-    if not cfg.referral_active or rt.ref_percent <= 0:
-        return
-    user = await db.get_user(buyer_id)
-    if user is None or not user["referrer_id"]:
-        return
-    bonus = amount * rt.ref_percent // 100
-    if bonus <= 0:
-        return
-    referrer_id = int(user["referrer_id"])
-    await db.add_balance(referrer_id, bonus, method="referral", kind="referral",
-                         note=f"бонус за покупку пользователя {buyer_id}")
-    await db.execute(
-        "UPDATE users SET ref_earned = ref_earned + ? WHERE telegram_id = ?", (bonus, referrer_id)
-    )
-    await safe_send(
-        bot, referrer_id,
-        f"🎉 <b>Реферальный бонус!</b>\nВаш приглашённый совершил покупку, "
-        f"на баланс начислено <b>{price(bonus, cfg.currency)}</b>.",
-    )
-
-
 async def complete_order(bot: Bot, cfg: Config, db: Database, order_id: int,
                          *, payment_id: str | None = None, silent: bool = False) -> bool:
-    """Помечает заказ оплаченным и выдаёт то, что заказано (подписку или баланс).
+    """Помечает заказ оплаченным и выдаёт подписку.
 
     Идемпотентность обеспечивается атомарным переходом pending -> paid
     (``db.claim_order_for_payment``): при одновременных вебхуке, опросе и
@@ -291,34 +268,21 @@ async def complete_order(bot: Bot, cfg: Config, db: Database, order_id: int,
                 order_id, promo_code, reason,
             )
 
-    if order["kind"] == "topup":
-        await db.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?",
-                         (order["amount"], user_id))
-        await db.log_payment(user_id, order["amount"], order["method"], "topup", f"заказ #{order_id}")
-        if not silent:
-            user = await db.get_user(user_id)
-            await safe_send(
-                bot, user_id,
-                f"💰 Баланс пополнен на <b>{price(order['amount'], cfg.currency)}</b>.\n"
-                f"Текущий баланс: <b>{price(int(user['balance']) if user else 0, cfg.currency)}</b>",
-            )
-    else:
-        await db.log_payment(user_id, order["amount"], order["method"], "order", f"заказ #{order_id}")
-        try:
-            await grant_subscription(bot, cfg, db, user_id, order["plan_code"], notify=not silent)
-        except PanelError as exc:
-            await safe_send(
-                bot, user_id,
-                "⚠️ Оплата получена, но выдать конфиг автоматически не получилось.\n"
-                "Мы уже работаем над этим — администратор выдаст ключ вручную.",
-            )
-            await notify_admins(
-                bot, cfg,
-                f"🚨 <b>Оплата прошла, но выдача не удалась</b>\nЗаказ #{order_id}, "
-                f"пользователь <code>{user_id}</code>\nОшибка: {esc(exc)}",
-            )
-            raise
-        await apply_referral_bonus(bot, cfg, db, user_id, order["amount"])
+    await db.log_payment(user_id, order["amount"], order["method"], "order", f"заказ #{order_id}")
+    try:
+        await grant_subscription(bot, cfg, db, user_id, order["plan_code"], notify=not silent)
+    except PanelError as exc:
+        await safe_send(
+            bot, user_id,
+            "⚠️ Оплата получена, но выдать конфиг автоматически не получилось.\n"
+            "Мы уже работаем над этим — администратор выдаст ключ вручную.",
+        )
+        await notify_admins(
+            bot, cfg,
+            f"🚨 <b>Оплата прошла, но выдача не удалась</b>\nЗаказ #{order_id}, "
+            f"пользователь <code>{user_id}</code>\nОшибка: {esc(exc)}",
+        )
+        raise
 
     await notify_admins(
         bot, cfg,
@@ -426,7 +390,7 @@ async def poll_yoomoney_orders(bot: Bot, cfg: Config, db: Database, ym) -> None:
         return
     rows = await db.fetchall(
         "SELECT id, amount FROM orders WHERE status = 'pending' AND method = 'yoomoney' "
-        "AND kind IN ('subscription', 'topup')"
+        "AND kind = 'subscription'"
     )
     for row in rows:
         op_id = await ym.find_payment(row["id"], int(row["amount"]))

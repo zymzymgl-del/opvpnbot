@@ -3,7 +3,7 @@
 
 Сеть и Telegram не нужны: Bot и Message подменяются заглушками, а апдейты
 подаются через ``Dispatcher.feed_update``. Проверяются: маршрутизация апдейтов,
-мидлвари, выдача ключей, оплата с баланса, промокоды, админ-панель.
+мидлвари, выдача ключей, промокоды, админ-панель.
 
 Запуск:  python tools/integration_test.py
 """
@@ -25,7 +25,7 @@ os.environ.update({
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "it.sqlite3"),
     "VPN_PANEL": "pool",
-    "PAYMENT_METHODS": "yoomoney,stars,balance,manual",
+    "PAYMENT_METHODS": "yoomoney,stars,manual",
     "YOOMONEY_WALLET": "410011234567890",
     "YOOMONEY_TOKEN": "test-token",
     "TRIAL_ENABLED": "true",
@@ -176,24 +176,27 @@ async def run() -> None:
     admins_notified = any("Ручная оплата" in text for _, text in OUT)
     expect("админ уведомлён о ручной оплате", admins_notified)
 
-    # пополнение баланса и оплата с баланса
+    # баланс вырезан: в профиле нет кнопки пополнения, оплата с баланса недоступна
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "menu:profile", 16))
     expect("профиль показан", "Профиль" in sent("message"))
-    await db.add_balance(555, 1000, method="admin", kind="adjust", note="test")
+    expect("в профиле нет кнопки пополнения баланса", "Пополнить баланс" not in sent("message"))
+
+    OUT.clear()
+    CALLBACK_ANSWERS.clear()
+    await dp.feed_update(bot, make_callback(555, f"pay:balance:{order_id}", 6))
+    expect("оплата с баланса недоступна", "Ключ отправлен" not in sent("message"), sent("message")[:120])
 
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "buy:1m", 5))
-    new_order = await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1")
-    await dp.feed_update(bot, make_callback(555, f"pay:balance:{new_order}", 6))
-    expect("оплата с баланса прошла", "Ключ отправлен" in sent("message"), sent("message")[:120])
-    sub = await db.active_subscription(555)
-    expect("подписка выдана и ключ из пула", sub is not None and "pool-key" in (sub["vpn_key"] or ""))
-    balance_after = int((await db.get_user(555))["balance"])
-    expect("с баланса списано 150", balance_after == 850, str(balance_after))
-
     orders_count = int(await db.scalar("SELECT COUNT(*) FROM orders WHERE user_id = 555"))
     expect("повторный buy переиспользовал счёт (не плодит заказы)", orders_count == 1, str(orders_count))
+
+    # ручной заказ подтверждает админ — появляется подписка (нужна для дальнейших шагов)
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, f"adm:order:approve:{order_id}", 6))
+    sub = await db.active_subscription(555)
+    expect("подписка выдана и ключ из пула", sub is not None and "pool-key" in (sub["vpn_key"] or ""))
 
     # продление доступно только в окне за 3 дня до окончания
     OUT.clear()
@@ -280,41 +283,16 @@ async def run() -> None:
     await dp.feed_update(bot, make_message(555, "🛒 Купить VPN", 27))
     expect("старая reply-кнопка открывает инлайн-меню",
            "Главное меню" in sent("message"), sent("message")[:80])
-    print("\n4a. Реферальная программа включена")
-    object.__setattr__(cfg, "ref_enabled", True)
+    print("\n4a. Реферальная программа вырезана")
     OUT.clear()
+    CALLBACK_ANSWERS.clear()
     await dp.feed_update(bot, make_callback(555, "ref:open", 25))
-    expect("реферальный раздел показан", "Приглашайте друзей" in sent("message"))
-    expect("в ссылке есть ref-метка", "start=ref_555" in sent("message"), sent("message")[-200:])
-
+    expect("реферальный раздел не открывается",
+           "Приглашайте друзей" not in sent("message"), sent("message")[:120])
     OUT.clear()
     await dp.feed_update(bot, make_message(999, "/start ref_555", 18))
-    ref_user = await db.get_user(999)
-    expect("реферал привязан",
-           ref_user is not None and int(ref_user["referrer_id"]) == 555,
-           str(ref_user["referrer_id"]) if ref_user else "пользователь не создан")
-
-    print("\n4b. Реферальная программа отключена (REF_ENABLED=false)")
-    object.__setattr__(cfg, "ref_enabled", False)
-    try:
-        OUT.clear()
-        CALLBACK_ANSWERS.clear()
-        await dp.feed_update(bot, make_callback(555, "ref:open", 26))
-        expect("раздел не показывается при отключении",
-               "Приглашайте друзей" not in sent("message") and "отключена" in " ".join(CALLBACK_ANSWERS),
-               (sent("message")[:80] + " | " + " ".join(CALLBACK_ANSWERS)))
-        OUT.clear()
-        CALLBACK_ANSWERS.clear()
-        await dp.feed_update(bot, make_callback(555, "ref:open", 20))
-        expect("колбэк ref:open отклонён", "отключена" in " ".join(CALLBACK_ANSWERS))
-        OUT.clear()
-        await dp.feed_update(bot, make_message(998, "/start ref_555", 21))
-        ref_off = await db.get_user(998)
-        expect("привязка реферрера заблокирована",
-               ref_off is None or ref_off["referrer_id"] is None,
-               str(ref_off["referrer_id"]) if ref_off else "пользователь не создан")
-    finally:
-        object.__setattr__(cfg, "ref_enabled", True)
+    expect("реферальная метка в /start игнорируется",
+           "Приглашайте" not in sent("message"), sent("message")[:120])
 
     print("\n5. Привязка существующего клиента панели (QR/claim)")
     import app.services.panels as panels_mod

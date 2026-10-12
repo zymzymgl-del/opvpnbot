@@ -27,10 +27,8 @@ STATUS_RU = {
 METHOD_RU = {
     "yookassa": "карта/СБП (ЮKassa)",
     "stars": "Telegram Stars",
-    "balance": "баланс",
     "manual": "вручную",
     "yoomoney": "ЮMoney",
-    "referral": "реферальный бонус",
 }
 
 

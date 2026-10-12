@@ -69,12 +69,10 @@ class AdminStates(StatesGroup):
     broadcast_text = State()
     user_find = State()
     user_message = State()
-    user_balance = State()
     user_grant = State()
     ticket_reply = State()
     plan_value = State()
     trial_days = State()
-    ref_percent = State()
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +92,7 @@ async def _panel_text(db: Database, cfg: Config) -> str:
         f"🧾 Открытых тикетов: <b>{stats['tickets_open']}</b>\n\n"
         f"Панель выдачи: <code>{cfg.panel}</code> · оплата: <code>{', '.join(cfg.payment_methods)}</code>\n\n"
         "💡 <i>Заказы — подтвердить оплаты · Ключи и тарифы — пул, цены и сроки · "
-        "Настройки — триал, рефералка, тарифы · Бэкап — копия базы файлом.</i>"
+        "Настройки — триал, тарифы · Бэкап — копия базы файлом.</i>"
     )
 
 
@@ -132,7 +130,6 @@ async def cb_about(call: CallbackQuery, cfg: Config) -> None:
 @router.callback_query(F.data == "adm:stats")
 async def cb_stats(call: CallbackQuery, db: Database, cfg: Config) -> None:
     stats = await db.stats()
-    top = await db.top_referrers(5)
     lines = [
         "📊 <b>Статистика</b>\n",
         f"👥 Пользователей: <b>{stats['users_total']}</b> (за сутки +{stats['users_day']}, "
@@ -144,13 +141,6 @@ async def cb_stats(call: CallbackQuery, db: Database, cfg: Config) -> None:
         f"за 30 дней <b>{price(stats['revenue_month'], cfg.currency)}</b>, "
         f"всего <b>{price(stats['revenue_total'], cfg.currency)}</b>",
     ]
-    if cfg.balance_enabled:
-        lines.append(f"💳 Пополнений баланса: {price(stats['topups_total'], cfg.currency)}")
-    if top:
-        lines.append("\n🏆 <b>Топ рефералов</b>")
-        for row in top:
-            name = row["full_name"] or (f"@{row['username']}" if row["username"] else str(row["telegram_id"]))
-            lines.append(f"• {esc(name)} — {row['invited']} чел., {price(int(row['ref_earned']), cfg.currency)}")
     await call.message.edit_text("\n".join(lines), reply_markup=back_kb("adm:panel", "◀️ Назад"))
     await call.answer()
 
@@ -425,11 +415,7 @@ async def _render_users(call: CallbackQuery, db: Database, cfg: Config, page: in
             marks.append("🚫")
         if row["subs"]:
             marks.append("🟢")
-        if row["ref_earned"]:
-            marks.append("🤝")
         entry = f"{' '.join(marks)} <code>{row['telegram_id']}</code> {esc(name)}"
-        if cfg.balance_enabled:
-            entry += f" · {price(int(row['balance']), cfg.currency)}"
         lines.append(entry)
     lines.append("\nНажмите на ID в списке ниже, чтобы открыть карточку.")
     ids = [int(row["telegram_id"]) for row in rows]
@@ -500,17 +486,11 @@ async def _show_user_card(target: Message | CallbackQuery, db: Database, cfg: Co
     subs = await db.user_subscriptions(user_id)
     orders = await db.user_orders(user_id, limit=5)
     active = [s for s in subs if s["status"] == "active"]
-    invited = int(await db.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,)))
     text = (
         f"👤 <b>{esc(user['full_name'] or 'без имени')}</b>\n"
         f"ID: <code>{user_id}</code> | @{esc(user['username'] or '—')}\n"
-    )
-    if cfg.balance_enabled:
-        text += f"Баланс: <b>{price(int(user['balance']), cfg.currency)}</b>\n"
-    text += (
         f"Статус: {'🚫 заблокирован' if user['is_banned'] else '✅ активен'}\n"
         f"Регистрация: {fmt_dt(user['created_at'])}, последняя активность: {fmt_dt(user['last_seen_at'])}\n"
-        f"Пригласил: {invited} | заработал на рефералах: {price(int(user['ref_earned']), cfg.currency)}\n"
     )
     if active:
         sub = active[0]
@@ -527,7 +507,7 @@ async def _show_user_card(target: Message | CallbackQuery, db: Database, cfg: Co
                 f"#{order['id']} · {esc(order['plan_code'])} · {price(int(order['amount']), cfg.currency)} · "
                 f"{STATUS_RU.get(order['status'], order['status'])}\n"
             )
-    markup = admin_user_kb(user_id, bool(user["is_banned"]), cfg.balance_enabled)
+    markup = admin_user_kb(user_id, bool(user["is_banned"]))
     if isinstance(target, CallbackQuery):
         try:
             await target.message.edit_text(text, reply_markup=markup)
@@ -568,16 +548,6 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
         await state.update_data(target_user=user_id)
         await state.set_state(AdminStates.user_message)
         await call.message.answer(f"✉️ Введите сообщение для <code>{user_id}</code>:", reply_markup=cancel_kb("adm:panel"))
-        await call.answer()
-        return
-    if action == "balance":
-        await state.update_data(target_user=user_id)
-        await state.set_state(AdminStates.user_balance)
-        await call.message.answer(
-            f"💵 Баланс сейчас: <b>{price(int(user['balance']), cfg.currency)}</b>.\n"
-            "Введите сумму со знаком: <code>500</code> — начислить, <code>-200</code> — списать.",
-            reply_markup=cancel_kb("adm:panel"),
-        )
         await call.answer()
         return
     if action == "grant":
@@ -629,26 +599,6 @@ async def msg_user_message(message: Message, state: FSMContext, bot: Bot, cfg: C
     delivered = await safe_send(bot, user_id, f"✉️ <b>Сообщение от администратора</b>\n\n{esc(message.text or '')}")
     await message.answer("✅ Отправлено." if delivered else "⚠️ Пользователь недоступен (заблокировал бота).",
                          reply_markup=back_kb("adm:panel", "◀️ Назад"))
-
-
-@router.message(AdminStates.user_balance)
-async def msg_user_balance(message: Message, state: FSMContext, db: Database, cfg: Config) -> None:
-    data = await state.get_data()
-    user_id = int(data.get("target_user") or 0)
-    await state.clear()
-    raw = (message.text or "").replace(" ", "").replace(",", ".")
-    try:
-        delta = int(float(raw))
-    except ValueError:
-        await message.answer("Нужно число, например 500 или -200.", reply_markup=back_kb("adm:panel"))
-        return
-    await db.add_balance(user_id, delta, method="admin", kind="adjust", note=f"правка админом {message.from_user.id}")
-    user = await db.get_user(user_id)
-    await message.answer(
-        f"✅ Баланс <code>{user_id}</code> изменён на {delta:+d}. Теперь: "
-        f"<b>{price(int(user['balance']) if user else 0, cfg.currency)}</b>",
-        reply_markup=back_kb("adm:panel", "◀️ Назад"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +873,7 @@ async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, bo
 
 
 # ---------------------------------------------------------------------------
-# Настройки: тарифы, пробный период, реферальный процент
+# Настройки: тарифы, пробный период
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "adm:settings")
 async def cb_settings(call: CallbackQuery, db: Database, cfg: Config) -> None:
@@ -934,10 +884,9 @@ async def cb_settings(call: CallbackQuery, db: Database, cfg: Config) -> None:
         f"Панель выдачи: <code>{cfg.panel}</code>\n"
         f"Способы оплаты: <code>{', '.join(cfg.payment_methods)}</code>\n"
         f"Пробный период: {'включён, ' + str(rt.trial_days) + ' дн.' if rt.trial_enabled else 'выключен'}\n"
-        f"Реферальная программа: {'включена, ' + str(rt.ref_percent) + '%' if cfg.referral_active else 'выключена'}\n"
         f"Тарифов: {len(plans)} | ключей в пуле: {pool['free']}\n\n"
-        "Значения пробного периода и реферального процента меняются на время работы бота "
-        "(постоянные значения задаются в .env)."
+        "Значение пробного периода меняется на время работы бота "
+        "(постоянное значение задаётся в .env)."
     )
     await call.message.edit_text(text, reply_markup=settings_kb())
     await call.answer()
@@ -1050,25 +999,6 @@ async def msg_trial_days(message: Message, state: FSMContext, db: Database) -> N
         f"✅ Пробный период: {'выключен' if raw == '0' else raw + ' дн.'}",
         reply_markup=back_kb("adm:settings", "◀️ Назад"),
     )
-
-
-@router.callback_query(F.data == "adm:settings:ref")
-async def cb_ref(call: CallbackQuery, state: FSMContext, cfg: Config) -> None:
-    await state.set_state(AdminStates.ref_percent)
-    await call.message.answer(f"Сейчас реферальный процент: {rt.ref_percent}%. Введите новое значение (0–50):",
-                              reply_markup=cancel_kb("adm:settings"))
-    await call.answer()
-
-
-@router.message(AdminStates.ref_percent)
-async def msg_ref_percent(message: Message, state: FSMContext, db: Database) -> None:
-    await state.clear()
-    raw = (message.text or "").strip()
-    if not raw.isdigit() or int(raw) > 50:
-        await message.answer("Введите число от 0 до 50.", reply_markup=back_kb("adm:settings"))
-        return
-    await rt.set_ref_percent(db, int(raw))
-    await message.answer(f"✅ Реферальный процент: {rt.ref_percent}%", reply_markup=back_kb("adm:settings", "◀️ Назад"))
 
 
 # ---------------------------------------------------------------------------

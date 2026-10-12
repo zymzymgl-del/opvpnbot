@@ -63,8 +63,7 @@ def plans_kb(plans: Sequence, currency: str = "₽", prefix: str = "buy") -> Inl
     return builder.as_markup()
 
 
-def payment_methods_kb(available: Iterable[str], order_id: int, balance: int | None = None,
-                       currency: str = "₽", allow_balance: bool = True) -> InlineKeyboardMarkup:
+def payment_methods_kb(available: Iterable[str], order_id: int, currency: str = "₽") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for method in available:
         if method == "yookassa":
@@ -73,12 +72,6 @@ def payment_methods_kb(available: Iterable[str], order_id: int, balance: int | N
             builder.button(text="💜 ЮMoney", callback_data=f"pay:yoomoney:{order_id}")
         elif method == "stars":
             builder.button(text="⭐️ Telegram Stars", callback_data=f"pay:stars:{order_id}")
-        elif method == "balance":
-            label = "💰 С баланса"
-            if balance is not None:
-                label += f" ({price(balance, currency)})"
-            if allow_balance:
-                builder.button(text=label, callback_data=f"pay:balance:{order_id}")
         elif method == "manual":
             builder.button(text="🧾 Оплачу вручную", callback_data=f"pay:manual:{order_id}")
     builder.button(text="🎟 Промокод", callback_data=f"promo:order:{order_id}")
@@ -87,13 +80,9 @@ def payment_methods_kb(available: Iterable[str], order_id: int, balance: int | N
     return builder.as_markup()
 
 
-def profile_kb(balance_enabled: bool = True, ref_enabled: bool = True) -> InlineKeyboardMarkup:
+def profile_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if balance_enabled:
-        builder.button(text="➕ Пополнить баланс", callback_data="topup:start")
     builder.button(text="📜 История заказов", callback_data="orders:history")
-    if ref_enabled:
-        builder.button(text="🤝 Пригласить друга", callback_data="ref:open")
     builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
     return builder.as_markup()
@@ -132,44 +121,6 @@ def keys_kb(subs: Sequence) -> InlineKeyboardMarkup:
         builder.button(text=f"{state} {sub['plan_code']} · до {sub['expires_at'][:10]}",
                        callback_data=f"sub:view:{sub['id']}")
     builder.button(text="◀️ В меню", callback_data="menu:main")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def referral_kb(ref_link: str, bot_username: str, ref_percent: int) -> InlineKeyboardMarkup:
-    share = (
-        "https://t.me/share/url?url="
-        + ref_link.replace("https://", "").replace("&", "%26").replace("?", "%3F").replace("=", "%3D").replace("/", "%2F")
-        + "&text=" + "Быстрый и стабильный VPN"
-    )
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📤 Поделиться ссылкой", url=share)
-    builder.button(text="📊 Статистика", callback_data="ref:stats")
-    builder.button(text="◀️ В меню", callback_data="menu:main")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def topup_amounts_kb(currency: str = "₽") -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for amount in (200, 500, 1000, 2000, 5000):
-        builder.button(text=price(amount, currency), callback_data=f"topup:sum:{amount}")
-    builder.button(text="✏️ Своя сумма", callback_data="topup:custom")
-    builder.button(text="◀️ Назад", callback_data="menu:profile")
-    builder.adjust(3, 2, 1, 1)
-    return builder.as_markup()
-
-
-def topup_methods_kb(order_id: int, available: Iterable[str]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for method in available:
-        if method == "yookassa":
-            builder.button(text="💳 Карта / СБП", callback_data=f"pay:yookassa:{order_id}")
-        elif method == "yoomoney":
-            builder.button(text="💜 ЮMoney", callback_data=f"pay:yoomoney:{order_id}")
-        elif method == "stars":
-            builder.button(text="⭐️ Telegram Stars", callback_data=f"pay:stars:{order_id}")
-    builder.button(text="❌ Отмена", callback_data="menu:profile")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -269,11 +220,9 @@ def admin_users_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_user_kb(user_id: int, is_banned: bool, balance_enabled: bool = True) -> InlineKeyboardMarkup:
+def admin_user_kb(user_id: int, is_banned: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✉️ Написать", callback_data=f"adm:user:msg:{user_id}")
-    if balance_enabled:
-        builder.button(text="💵 Изменить баланс", callback_data=f"adm:user:balance:{user_id}")
     builder.button(text="🎁 Выдать подписку", callback_data=f"adm:user:grant:{user_id}")
     builder.button(text="🔓 Разблокировать" if is_banned else "🚫 Заблокировать",
                    callback_data=f"adm:user:{'unban' if is_banned else 'ban'}:{user_id}")
@@ -331,7 +280,6 @@ def settings_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 Тарифы", callback_data="adm:settings:plans")
     builder.button(text="⚙️ Тариф пробного периода", callback_data="adm:settings:trial")
-    builder.button(text="🤝 Реферальный процент", callback_data="adm:settings:ref")
     builder.button(text="ℹ️ О боте / версия", callback_data="adm:about")
     builder.button(text="◀️ Назад", callback_data="adm:panel")
     builder.adjust(1)

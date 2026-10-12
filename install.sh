@@ -166,7 +166,7 @@ collect_config() {
   ask_required ADMIN_IDS "Ваш Telegram ID (из @userinfobot), можно несколько через запятую"
   ask BOT_NAME "Название сервиса" "OPVPN"
   ask SUPPORT_USERNAME "Поддержка, без @" "support"
-  ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa,yoomoney,stars,balance,manual"
+  ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa,yoomoney,stars,manual"
 
   printf '\n%s\n' "${c_blu}=== Выдача ключей ===${c_reset}"
   ask_choice VPN_PANEL "Режим выдачи ключей" "pool" pool xui

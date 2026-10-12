@@ -44,9 +44,9 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 | Таблица | Назначение | Ключевые поля |
 |---|---|---|
-| `users` | клиенты | telegram_id PK, balance (коп.), referrer_id, ref_earned, trial_used, is_banned |
+| `users` | клиенты | telegram_id PK, trial_used, is_banned |
 | `plans` | витрина | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order |
-| `orders` | заказы/пополнения | kind ∈ subscription/topup, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
+| `orders` | заказы | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
 | `subscriptions` | выданные ключи | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d») |
 | `key_pool` | пул конфигов | content UNIQUE, plan_code (NULL = любой), is_used/used_by |
 | `promos`, `promo_uses` | промокоды | discount_type percent/fixed, max_uses, expires_at |
@@ -90,22 +90,21 @@ requirements-dev.txt       — инструменты разработки (ruff
 * **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
 * **ЮMoney** (`YooMoneyClient`): форма quickpay с `label=opvpnbot-order-{id}`; автоподтверждение поиском входящей операции в operation-history по label и сумме. Домен не нужен.
 * **Telegram Stars**: `send_invoice(currency="XTR", provider_token="")`, payload `order:{id}`; обработка `pre_checkout_query` / `successful_payment`; возврат — `refund_star_payment`.
-* **Баланс**: атомарный `UPDATE users SET balance = balance - ?`, при сбое выдачи — автоматический возврат.
 * **Manual**: заказ создаётся, админ подтверждает через `adm:order:approve` → `complete_order(payment_id="manual:{admin_id}")`.
 
-Единая точка завершения — `complete_order()`: помечает paid → начисляет топ-ап или выдаёт подписку (`grant_subscription`) → реферальный бонус → уведомления админам. Идемпотентна по статусу заказа.
+Единая точка завершения — `complete_order()`: помечает paid → выдаёт подписку (`grant_subscription`) → уведомления админам. Идемпотентна по статусу заказа.
 
 ## 6. Состояния FSM (aiogram StatesGroup)
 
-* Пользователь: `PromoStates.enter`, `TopupStates.custom_amount`, `TicketStates.subject/message/reply`.
-* Админ: `AdminStates.*` (добавление ключей, мастер промокода из 5 шагов, рассылка, поиск/сообщение/баланс/выдача пользователя, ответ в тикет, редактирование тарифа, триал, реф-%).
+* Пользователь: `PromoStates.enter`, `TicketStates.subject/message/reply`.
+* Админ: `AdminStates.*` (добавление ключей, мастер промокода из 5 шагов, рассылка, поиск/сообщение/выдача пользователя, ответ в тикет, редактирование тарифа, триал).
 
 ## 7. Известные технические долги (зафиксированы при реконструкции)
 
 1. **Дублирование** `sub:view/copy/qr/howto` в `msg_my_keys` и `show_subscription` — требует унификации callback'ов (`sub:*` принимает и id подписки, и order_id временного ключа).
-2. ~~**Нет транзакций** в критичных местах~~ — **исправлено**: `complete_order` использует атомарный `db.claim_order_for_payment` (pending → paid под `_lock`, двойная выдача невозможна); `take_key` — один `UPDATE ... RETURNING`; `add_balance` и `apply_promo` выполняются под одним захватом `_lock` с единым коммитом. Покрыто проверками 64–71 в `tools/selftest.py` (раздел «Конкурентность и идемпотентность выдачи»).
+2. ~~**Нет транзакций** в критичных местах~~ — **исправлено**: `complete_order` использует атомарный `db.claim_order_for_payment` (pending → paid под `_lock`, двойная выдача невозможна); `take_key` — один `UPDATE ... RETURNING`; `apply_promo` выполняется под одним захватом `_lock` с единым коммитом. Покрыто проверками 64–71 в `tools/selftest.py` (раздел «Конкурентность и идемпотентность выдачи»).
 3. ~~`poll_yookassa_orders` каждый цикл создаёт новый `YooKassaClient`~~ — **исправлено**: фоновый воркер получает переиспользуемый клиент из `bot.py` (`background_worker(..., yk=yk)` → `poll_yookassa_orders(..., client=yk)`); локальный клиент создаётся только как fallback.
-4. В `user.py` остались заглушки «Оплата пока недоступна» для `buy:yoomoney:` / `buy:stars:` / `buy:balance:` / `buy:manual:` — основной путь оплаты идёт через `pay:<method>:<order_id>`.
+4. В `user.py` остались заглушки «Оплата пока недоступна» для `buy:yoomoney:` / `buy:stars:` / `buy:manual:` — основной путь оплаты идёт через `pay:<method>:<order_id>`.
 5. Прямые SQL из хендлеров (например, `SELECT * FROM subscriptions WHERE id = ?`) в обход методов `Database`.
 6. `required_channels` проверяются через `get_chat_member` с кэшем 120 c; при ошибке API — «разрешить» (fail-open, осознанно).
 

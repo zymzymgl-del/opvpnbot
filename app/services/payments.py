@@ -1,4 +1,4 @@
-"""Платежи: ЮKassa (карты/СБП), Telegram Stars и внутренний баланс."""
+"""Платежи: ЮKassa (карты/СБП), ЮMoney и Telegram Stars."""
 
 from __future__ import annotations
 

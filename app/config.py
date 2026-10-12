@@ -121,12 +121,6 @@ class Config:
     trial_traffic_gb: int
     trial_panel_hint: str
 
-    # --- Реферальная программа ---
-    ref_enabled: bool
-    ref_percent: int
-    ref_welcome_bonus: int
-    ref_min_payout: int
-
     # --- Оплата ---
     payment_methods: tuple[str, ...]
     yookassa_shop_id: str
@@ -136,8 +130,6 @@ class Config:
     yoomoney_wallet: str
     yoomoney_token: str
     stars_rate: float
-    min_topup: int
-    max_topup: int
     manual_payment_note: str
     payments_proxy: str
 
@@ -193,18 +185,8 @@ class Config:
         return "stars" in self.payment_methods
 
     @property
-    def balance_enabled(self) -> bool:
-        return "balance" in self.payment_methods
-
-    @property
     def manual_enabled(self) -> bool:
         return "manual" in self.payment_methods
-
-    @property
-    def referral_active(self) -> bool:
-        """Реферальные начисления идут только на баланс, поэтому без баланса
-        реферальная программа фактически не работает."""
-        return self.ref_enabled and self.balance_enabled
 
     def stars_price(self, amount_rub: int) -> int:
         """Перевод цены в рублях в количество Telegram Stars."""
@@ -230,11 +212,7 @@ def load_config() -> Config:
         trial_devices=_int("TRIAL_DEVICES", 1),
         trial_traffic_gb=_int("TRIAL_TRAFFIC_GB", 10),
         trial_panel_hint=_str("TRIAL_PANEL_HINT", "trial"),
-        ref_enabled=_bool("REF_ENABLED", False),
-        ref_percent=_int("REF_PERCENT", 15),
-        ref_welcome_bonus=_int("REF_WELCOME_BONUS", 0),
-        ref_min_payout=_int("REF_MIN_PAYOUT", 100),
-        payment_methods=_list("PAYMENT_METHODS", ("yookassa", "stars", "balance", "manual")),
+        payment_methods=_list("PAYMENT_METHODS", ("yookassa", "yoomoney", "stars", "manual")),
         yookassa_shop_id=_str("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=_str("YOOKASSA_SECRET_KEY"),
         yookassa_return_url=_str("YOOKASSA_RETURN_URL", "https://t.me"),
@@ -242,8 +220,6 @@ def load_config() -> Config:
         yoomoney_wallet=_str("YOOMONEY_WALLET"),
         yoomoney_token=_str("YOOMONEY_TOKEN"),
         stars_rate=_float("STARS_RATE", 1.5),
-        min_topup=_int("MIN_TOPUP", 100),
-        max_topup=_int("MAX_TOPUP", 50000),
         manual_payment_note=_str("MANUAL_PAYMENT_NOTE", "Реквизиты уточняйте у поддержки."),
         payments_proxy=_str("PAYMENTS_PROXY"),
         panel=_str("VPN_PANEL", "pool").lower(),

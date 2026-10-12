@@ -18,9 +18,6 @@ CREATE TABLE IF NOT EXISTS users (
     telegram_id     INTEGER PRIMARY KEY,
     username        TEXT,
     full_name       TEXT,
-    balance         INTEGER NOT NULL DEFAULT 0,
-    referrer_id     INTEGER,
-    ref_earned      INTEGER NOT NULL DEFAULT 0,
     trial_used      INTEGER NOT NULL DEFAULT 0,
     is_banned       INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
@@ -293,21 +290,15 @@ class Database:
         return default if value is None else value
 
     # --- users ---------------------------------------------------------
-    async def ensure_user(self, telegram_id: int, username: str | None, full_name: str | None,
-                          referrer_id: int | None = None) -> aiosqlite.Row:
+    async def ensure_user(self, telegram_id: int, username: str | None,
+                          full_name: str | None) -> aiosqlite.Row:
         now = to_iso(utcnow())
         row = await self.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         if row is None:
-            if referrer_id == telegram_id:
-                referrer_id = None
-            if referrer_id is not None:
-                exists = await self.fetchone("SELECT 1 FROM users WHERE telegram_id = ?", (referrer_id,))
-                if exists is None:
-                    referrer_id = None
             await self.execute(
-                "INSERT INTO users(telegram_id, username, full_name, referrer_id, created_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (telegram_id, username, full_name, referrer_id, now, now),
+                "INSERT INTO users(telegram_id, username, full_name, created_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (telegram_id, username, full_name, now, now),
             )
             row = await self.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         else:
@@ -322,34 +313,10 @@ class Database:
         return await self.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
 
     async def set_user_field(self, telegram_id: int, field: str, value: Any) -> None:
-        allowed = {"username", "full_name", "balance", "referrer_id", "ref_earned", "trial_used", "is_banned"}
+        allowed = {"username", "full_name", "trial_used", "is_banned"}
         if field not in allowed:
             raise ValueError(f"Недопустимое поле users.{field}")
         await self.execute(f"UPDATE users SET {field} = ? WHERE telegram_id = ?", (value, telegram_id))
-
-    async def add_balance(self, telegram_id: int, delta: int, *, method: str = "balance",
-                          kind: str = "topup", note: str = "") -> None:
-        """Атомарно начисляет средства и пишет запись в payments_log.
-
-        Оба изменения выполняются под одним захватом ``_lock`` без
-        промежуточного коммита — при ошибке второй операции первая не
-        останется «висящей» в БД (см. docs/ARCHITECTURE.md, техдолг #2).
-        """
-        async with self._lock:
-            await self.conn.execute(
-                "UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (delta, telegram_id)
-            )
-            await self.conn.execute(
-                "INSERT INTO payments_log(user_id, amount, method, kind, note, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (telegram_id, delta, method, kind, note, to_iso(utcnow())),
-            )
-            await self.conn.commit()
-
-    async def add_balance_atomic(self, telegram_id: int, delta: int, *, method: str = "balance",
-                                 kind: str = "topup", note: str = "") -> None:
-        """Совместимость: псевдоним атомарного add_balance."""
-        await self.add_balance(telegram_id, delta, method=method, kind=kind, note=note)
 
     async def all_user_ids(self, audience: str = "all") -> list[int]:
         if audience == "subscribers":
@@ -818,19 +785,8 @@ class Database:
             "revenue_month": int(await self.scalar(
                 "SELECT COALESCE(SUM(amount), 0) FROM orders WHERE status = 'paid' AND kind = 'subscription' "
                 "AND paid_at >= ?", (month_ago,))),
-            "topups_total": int(await self.scalar(
-                "SELECT COALESCE(SUM(amount), 0) FROM orders WHERE status = 'paid' AND kind = 'topup'")),
             "tickets_open": int(await self.scalar("SELECT COUNT(*) FROM tickets WHERE status = 'open'")),
         }
-
-    async def top_referrers(self, limit: int = 10) -> list[aiosqlite.Row]:
-        return await self.fetchall(
-            "SELECT u.telegram_id, u.username, u.full_name, u.ref_earned, "
-            "(SELECT COUNT(*) FROM users x WHERE x.referrer_id = u.telegram_id) AS invited "
-            "FROM users u WHERE u.ref_earned > 0 OR (SELECT COUNT(*) FROM users x WHERE x.referrer_id = u.telegram_id) > 0 "
-            "ORDER BY u.ref_earned DESC, invited DESC LIMIT ?",
-            (limit,),
-        )
 
     # --- settings ------------------------------------------------------------
     async def get_setting(self, key: str, default: str = "") -> str:

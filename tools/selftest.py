@@ -4,8 +4,8 @@
 Запуск:  python tools/selftest.py
 
 Проверяет: инициализацию БД, выдачу ключей из пула, продление, оплату заказа,
-пополнение баланса, реферальные бонусы, промокоды, напоминания, отключение
-истёкших подписок, сборку ссылок 3x-ui и валидацию конфигурации.
+промокоды, напоминания, отключение истёкших подписок, сборку ссылок 3x-ui
+и валидацию конфигурации.
 """
 
 from __future__ import annotations
@@ -28,13 +28,9 @@ os.environ.update({
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "test.sqlite3"),
     "VPN_PANEL": "pool",
-    "PAYMENT_METHODS": "stars,balance,manual",
+    "PAYMENT_METHODS": "stars,manual",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "2",
-    # Реферальные бонусы идут только на баланс, поэтому для проверки нужны
-    # оба переключателя: REF_ENABLED + balance в PAYMENT_METHODS.
-    "REF_ENABLED": "true",
-    "REF_PERCENT": "20",
     "LOG_FILE": str(Path(TMP) / "bot.log"),
 })
 
@@ -123,7 +119,6 @@ async def run() -> None:
     await db.connect()
     await rt.load(db, cfg)
     check("тарифы посеяны по умолчанию", len(await db.active_plans()) == 4)
-    check("рантайм подхватил реф-процент из .env", rt.ref_percent == 20, str(rt.ref_percent))
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.
@@ -187,29 +182,14 @@ async def run() -> None:
     soon = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(sub["id"]),))
     check("продление в окне (2 дн.) доступно", renewal_available(soon, cfg) is True)
 
-    print("\n4. Заказы, баланс и реферальные бонусы")
-    await db.ensure_user(2001, "ref_user", "Реферер")
-    await db.ensure_user(3001, "buyer", "Покупатель", referrer_id=2001)
+    print("\n4. Заказы и оплата")
+    await db.ensure_user(3001, "buyer", "Покупатель")
     order_id = await db.create_order(3001, "1m", 299, 299, None, "stars")
     await complete_order(bot, cfg, db, order_id, payment_id="star-charge-1")
     order = await db.get_order(order_id)
     check("заказ помечен оплаченным", order["status"] == "paid")
     buyer_sub = await db.active_subscription(3001)
     check("подписка выдана по заказу", buyer_sub is not None)
-
-    referrer = await db.get_user(2001)
-    check("реферальный бонус 20% начислен", int(referrer["balance"]) == 59, str(referrer["balance"]))
-    check("реферер уведомлён", "Реферальный бонус" in bot.last_text_for(2001))
-
-    topup_id = await db.create_order(3001, "topup", 500, 500, None, "stars", kind="topup")
-    await complete_order(bot, cfg, db, topup_id, payment_id="star-charge-2")
-    buyer = await db.get_user(3001)
-    check("баланс пополнен на 500", int(buyer["balance"]) == 500, str(buyer["balance"]))
-
-    pay_order = await db.create_order(3001, "1m", 299, 299, None, "balance")
-    await complete_order(bot, cfg, db, pay_order)
-    buyer = await db.get_user(3001)
-    check("списание баланса выполнено вручную (проверка сценария)", int(buyer["balance"]) == 500)
 
     print("\n5. Промокоды")
     await db.create_promo("vpn10", "percent", 10, max_uses=1, expires_at=None)
@@ -313,10 +293,9 @@ async def run() -> None:
     print("\n9. Клавиатуры и статистика")
     check("главное меню собирается", main_menu(True, True) is not None)
     check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
-    check("выбор способа оплаты собирается", payment_methods_kb(["stars", "balance"], 1, 100) is not None)
+    check("выбор способа оплаты собирается", payment_methods_kb(["stars", "manual"], 1) is not None)
     stats = await db.stats()
-    check("статистика считается", stats["users_total"] >= 4 and stats["revenue_total"] >= 598, str(stats["revenue_total"]))
-    check("топ рефералов не пуст", len(await db.top_referrers()) >= 1)
+    check("статистика считается", stats["users_total"] >= 3 and stats["revenue_total"] >= 299, str(stats["revenue_total"]))
 
 
     print("\n10. Клиент ЮKassa (HTTP подменён заглушкой)")
@@ -402,7 +381,7 @@ async def run() -> None:
     print("\n12. ЮMoney: форма и проверка перевода")
     from app.services.payments import YooMoneyClient
 
-    os.environ["PAYMENT_METHODS"] = "yoomoney,stars,balance,manual"
+    os.environ["PAYMENT_METHODS"] = "yoomoney,stars,manual"
     os.environ["YOOMONEY_WALLET"] = "410011234567890"
     os.environ["YOOMONEY_TOKEN"] = "test-yoomoney-token"
     ym_cfg = load_config()
@@ -438,16 +417,17 @@ async def run() -> None:
     session.responses.append((401, {"error": "unauthorized"}))
     check("ошибка API ЮMoney обрабатывается", await ymc.find_payment(7, 150) is None)
 
-    check("профиль содержит рефералку", "ref:open" in profile_kb(True).inline_keyboard.__repr__())
-    check("кнопка рефералки скрыта при REF_ENABLED=false",
-          "ref:open" not in profile_kb(True, False).inline_keyboard.__repr__())
+    check("профиль содержит кнопку истории заказов", "orders:history" in profile_kb().inline_keyboard.__repr__())
+    check("в профиле нет кнопок баланса/рефералки",
+          "topup:start" not in profile_kb().inline_keyboard.__repr__()
+          and "ref:open" not in profile_kb().inline_keyboard.__repr__())
 
     print("\n12. Конкурентность и идемпотентность выдачи")
     # 12a. Двойное завершение одного заказа: только один вызов "захватывает" pending -> paid
     await db.ensure_user(5001, "carol", "Кэрол")
     await db.add_keys(["vless://race-key-1@example.com:443#race1",
                        "vless://race-key-2@example.com:443#race2"], plan_code="1m")
-    race_order = await db.create_order(5001, "1m", 150, 150, None, "balance", "subscription")
+    race_order = await db.create_order(5001, "1m", 150, 150, None, "stars", "subscription")
     results = await asyncio.gather(*(complete_order(bot, cfg, db, race_order) for _ in range(5)))
     order_5001 = await db.get_order(race_order)
     subs_5001 = await db.fetchall("SELECT * FROM subscriptions WHERE user_id = 5001")
@@ -467,15 +447,7 @@ async def run() -> None:
     check("параллельный take_key вернул оба ключа", len(values) == 2, str(values))
     check("ключи не повторяются", len(set(values)) == 2, str(values))
 
-    # 12c. Атомарность add_balance: начисление и payments_log появляются вместе
-    await db.ensure_user(5004, "frank", "Фрэнк")
-    await asyncio.gather(*(db.add_balance(5004, 10, note=f"c{i}") for i in range(10)))
-    u5004 = await db.get_user(5004)
-    logs5004 = await db.fetchall("SELECT * FROM payments_log WHERE user_id = 5004")
-    check("10 параллельных начислений дали ровно 100", int(u5004["balance"]) == 100, str(u5004["balance"]))
-    check("каждому начислению соответствует запись в payments_log", len(logs5004) == 10, str(len(logs5004)))
-
-    # 12d. Промокод: лимит max_uses не превышается при параллельной активации
+    # 12c. Промокод: лимит max_uses не превышается при параллельной активации
     await db.create_promo("RACE50", "fixed", 50, max_uses=2, expires_at=None)
     for uid, name in ((5005, "gina"), (5006, "hugo"), (5007, "ivan")):
         await db.ensure_user(uid, name, name)
@@ -491,13 +463,13 @@ async def run() -> None:
           ok_count == 2 and used_total == 2 and uses_rows == 2,
           f"ok={ok_count}, used={used_total}, rows={uses_rows}")
 
-    # 12e. Промокод: повторная активация тем же пользователем (даже параллельно) отклонена
+    # 12d. Промокод: повторная активация тем же пользователем (даже параллельно) отклонена
     winner = next(uid for uid, (ok, _r, _row) in zip((5005, 5006, 5007), reserved) if ok)
     twice = await asyncio.gather(db.reserve_promo("RACE50", winner), db.reserve_promo("RACE50", winner))
     check("промокод: повторная активация тем же пользователем отклонена",
           not any(ok for ok, _r, _row in twice))
 
-    # 12f. release_promo освобождает лимит для повторного использования
+    # 12e. release_promo освобождает лимит для повторного использования
     await db.release_promo("RACE50", winner)
     used_after_release = int(await db.scalar("SELECT used FROM promos WHERE code = 'RACE50'"))
     check("промокод: release уменьшает счётчик", used_after_release == 1, str(used_after_release))

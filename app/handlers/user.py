@@ -1,4 +1,4 @@
-"""Хендлеры пользовательской части: магазин, оплата, ключи, профиль, рефералы, поддержка."""
+"""Хендлеры пользовательской части: магазин, оплата, ключи, профиль, поддержка."""
 
 from __future__ import annotations
 
@@ -37,11 +37,8 @@ from app.keyboards import (
     payment_methods_kb,
     plans_kb,
     profile_kb,
-    referral_kb,
     subscription_kb,
     support_kb,
-    topup_amounts_kb,
-    topup_methods_kb,
     yoomoney_kb,
 )
 from app.runtime import runtime as rt
@@ -83,7 +80,7 @@ FAQ_TEXT = (
 def _methods_line(cfg: Config) -> str:
     """Человеческий список включённых способов оплаты (без служебных «none»/«manual»)."""
     names = [METHOD_RU[m] for m in cfg.payment_methods
-             if m in {"yookassa", "yoomoney", "stars", "balance"}]
+             if m in {"yookassa", "yoomoney", "stars"}]
     return ", ".join(names) if names else "по согласованию с поддержкой"
 
 
@@ -115,10 +112,6 @@ class PromoStates(StatesGroup):
     enter = State()
 
 
-class TopupStates(StatesGroup):
-    custom_amount = State()
-
-
 class TicketStates(StatesGroup):
     subject = State()
     message = State()
@@ -144,32 +137,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
         await _send_menu_window(message, prefix + esc(result.message), cfg)
         return
 
-    row = await db.get_user(user.id)
-    if cfg.referral_active and row is not None and row["referrer_id"] is None and payload.startswith("ref_"):
-        raw = payload[4:]
-        if raw.isdigit() and int(raw) != user.id:
-            await db.set_user_field(user.id, "referrer_id", int(raw))
-            await db.set_user_field(user.id, "username", user.username)
-            if cfg.ref_welcome_bonus > 0:
-                await db.add_balance(user.id, cfg.ref_welcome_bonus, method="referral",
-                                     kind="welcome", note="бонус за переход по ссылке")
-                await safe_send(
-                    bot, user.id,
-                    f"🎁 Вам начислен приветственный бонус <b>{price(cfg.ref_welcome_bonus, cfg.currency)}</b> "
-                    "на баланс — можно использовать при первой покупке!",
-                )
-            await safe_send(
-                bot, int(raw),
-                "👋 По вашей ссылке зашёл новый пользователь! Если он оформит подписку, "
-                f"вы получите {rt.ref_percent}% от платежа на баланс.",
-            )
-
-    tail = "Все покупки — в «🔑 Моя подписка»"
-    if cfg.referral_active:
-        tail += ", бонусы и друзья — в «👤 Профиль»"
-    else:
-        tail += ", профиль — в «👤 Профиль»"
-    tail += ", вопросы — «🆘 Поддержка». Меню ниже 👇"
+    tail = "Все покупки — в «🔑 Моя подписка», профиль — в «👤 Профиль», вопросы — «🆘 Поддержка». Меню ниже 👇"
     greeting = (
         f"👋 <b>Добро пожаловать в {esc(cfg.bot_name)}!</b>\n\n"
         "Как это работает — 3 шага:\n"
@@ -311,8 +279,6 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
         await target.answer("Заказ не найден.", show_alert=True)
         return
     plan = await db.get_plan(order["plan_code"])
-    user = await db.get_user(int(order["user_id"]))
-    balance = int(user["balance"]) if user else 0
     text = (
         f"🧾 <b>Заказ #{order_id}</b>\n\n"
         f"Тариф: <b>{esc(plan['title'] if plan else order['plan_code'])}</b>\n"
@@ -324,9 +290,7 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
         text += f"Было: {price(int(order['base_amount']), cfg.currency)}\n"
     text += f"\nК оплате: <b>{price(int(order['amount']), cfg.currency)}</b>"
     available = [m for m in cfg.payment_methods if m != "none"]
-    if "balance" in available and balance < int(order["amount"]):
-        available = [m for m in available if m != "balance"]
-    markup = payment_methods_kb(available, order_id, balance, cfg.currency)
+    markup = payment_methods_kb(available, order_id, cfg.currency)
     try:
         await target.message.edit_text(text, reply_markup=markup)
     except Exception:
@@ -542,27 +506,6 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             stars_amount=stars,
         )
         await db.execute("UPDATE orders SET method = 'stars' WHERE id = ?", (order_id,))
-        await call.answer()
-        return
-
-    if action == "balance":
-        user = await db.get_user(call.from_user.id)
-        balance = int(user["balance"]) if user else 0
-        if balance < amount:
-            await call.answer(f"Недостаточно средств: на балансе {price(balance, cfg.currency)}",
-                              show_alert=True)
-            return
-        await db.execute("UPDATE users SET balance = balance - ? WHERE telegram_id = ?",
-                         (amount, call.from_user.id))
-        await db.execute("UPDATE orders SET method = 'balance' WHERE id = ?", (order_id,))
-        try:
-            await complete_order(bot, cfg, db, order_id)
-        except PanelError as exc:
-            await db.add_balance(call.from_user.id, amount, method="balance", kind="refund",
-                                 note=f"возврат по заказу #{order_id}")
-            await call.answer(f"Не получилось выдать ключ: {exc}", show_alert=True)
-            return
-        await call.message.edit_text("✅ Оплачено с баланса! Ключ отправлен отдельным сообщением.")
         await call.answer()
         return
 
@@ -820,21 +763,17 @@ async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> 
 
 
 # ---------------------------------------------------------------------------
-# Профиль и баланс
+# Профиль
 # ---------------------------------------------------------------------------
 async def _profile_text(db: Database, cfg: Config, user_id: int) -> str:
-    user = await db.get_user(user_id)
     sub = await db.active_subscription(user_id)
     orders = await db.user_orders(user_id, limit=100)
     paid = sum(1 for o in orders if o["status"] == "paid")
-    balance = int(user["balance"]) if user and user["balance"] is not None else 0
     text = (
         "👤 <b>Профиль</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
+        f"🛒 Покупок: <b>{paid}</b>\n"
     )
-    if cfg.balance_enabled:
-        text += f"💰 Баланс: <b>{price(balance, cfg.currency)}</b>\n"
-    text += f"🛒 Покупок: <b>{paid}</b>\n"
     if sub is not None:
         text += (
             f"\n🟢 Подписка: <b>{esc(sub['plan_code'])}</b>\n"
@@ -842,15 +781,13 @@ async def _profile_text(db: Database, cfg: Config, user_id: int) -> str:
         )
     else:
         text += "\n🔴 Активной подписки нет.\n"
-    if user is not None and int(user["ref_earned"] or 0) > 0:
-        text += f"\n🤝 Заработано на рефералах: <b>{price(int(user['ref_earned']), cfg.currency)}</b>"
     return text
 
 
 @router.callback_query(F.data == "menu:profile")
 async def cb_profile(call: CallbackQuery, db: Database, cfg: Config) -> None:
     text = await _profile_text(db, cfg, call.from_user.id)
-    await _edit_or_answer(call, text, profile_kb(cfg.balance_enabled, cfg.referral_active))
+    await _edit_or_answer(call, text, profile_kb())
     await call.answer()
 
 
@@ -867,131 +804,6 @@ async def cb_orders_history(call: CallbackQuery, db: Database, cfg: Config) -> N
             f"{STATUS_RU.get(order['status'], order['status'])} · {order['created_at'][:10]}"
         )
     await call.message.answer("\n".join(lines), reply_markup=back_kb("menu:profile", "◀️ В профиль"))
-    await call.answer()
-
-
-@router.callback_query(F.data == "topup:start")
-async def cb_topup_start(call: CallbackQuery, cfg: Config) -> None:
-    if not cfg.balance_enabled:
-        await call.answer("Пополнение баланса отключено.", show_alert=True)
-        return
-    await call.message.edit_text(
-        f"💰 <b>Пополнение баланса</b>\n\nВыберите сумму (от {price(cfg.min_topup, cfg.currency)}):",
-        reply_markup=topup_amounts_kb(cfg.currency),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "topup:custom")
-async def cb_topup_custom(call: CallbackQuery, state: FSMContext, cfg: Config) -> None:
-    await state.set_state(TopupStates.custom_amount)
-    await call.message.answer(
-        f"✏️ Введите сумму пополнения в {cfg.currency} (от {cfg.min_topup} до {cfg.max_topup}):",
-        reply_markup=cancel_kb("menu:profile"),
-    )
-    await call.answer()
-
-
-@router.message(TopupStates.custom_amount)
-async def msg_topup_custom(message: Message, state: FSMContext, db: Database, cfg: Config) -> None:
-    raw = (message.text or "").strip().replace(" ", "").replace(",", ".")
-    await state.clear()
-    try:
-        amount = int(float(raw))
-    except ValueError:
-        await message.answer("Нужно целое число, попробуйте снова.", reply_markup=cancel_kb("menu:profile"))
-        return
-    await _create_topup(message, db, cfg, amount)
-
-
-@router.callback_query(F.data.startswith("topup:sum:"))
-async def cb_topup_sum(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    amount = int(call.data.rsplit(":", 1)[1])
-    await _create_topup(call.message, db, cfg, amount, user_id=call.from_user.id, answer=call)
-    await call.answer()
-
-
-async def _create_topup(target: Message, db: Database, cfg: Config, amount: int,
-                        user_id: int | None = None, answer: CallbackQuery | None = None) -> None:
-    uid = user_id or (target.from_user.id if target.from_user else 0)
-    if amount < cfg.min_topup or amount > cfg.max_topup:
-        text = f"Сумма должна быть от {cfg.min_topup} до {cfg.max_topup} {cfg.currency}."
-        if answer:
-            await answer.answer(text, show_alert=True)
-        else:
-            await target.answer(text)
-        return
-    order_id = await db.create_order(user_id=uid, plan_code="topup", amount=amount, base_amount=amount,
-                                     promo_code=None, method="none", kind="topup")
-    available = [m for m in cfg.payment_methods if m in {"yookassa", "stars", "yoomoney"}]
-    if not available:
-        await target.answer("Пополнение временно недоступно.")
-        return
-    text = (
-        f"💰 Пополнение баланса на <b>{price(amount, cfg.currency)}</b>\n\nВыберите способ оплаты:"
-    )
-    markup = topup_methods_kb(order_id, available)
-    if answer:
-        try:
-            await target.edit_text(text, reply_markup=markup)
-        except Exception:
-            await target.answer(text, reply_markup=markup)
-    else:
-        await target.answer(text, reply_markup=markup)
-
-# ---------------------------------------------------------------------------
-# Реферальная программа
-# ---------------------------------------------------------------------------
-async def _ref_text(db: Database, cfg: Config, user_id: int, bot_username: str) -> tuple[str, str]:
-    user = await db.get_user(user_id)
-    invited = await db.scalar("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
-    link = f"https://t.me/{bot_username}?start=ref_{user_id}" if bot_username else "ссылка недоступна"
-    earned = int(user["ref_earned"]) if user else 0
-    text = (
-        "🤝 <b>Приглашайте друзей и зарабатывайте</b>\n\n"
-        f"Вы получаете <b>{rt.ref_percent}%</b> от каждой покупки приглашённого — на баланс, "
-        "которым можно оплачивать свою подписку.\n\n"
-        f"👥 Приглашено: <b>{invited}</b>\n"
-        f"💰 Заработано: <b>{price(earned, cfg.currency)}</b>\n\n"
-        f"🔗 Ваша ссылка:\n<code>{link}</code>"
-    )
-    return text, link
-
-
-@router.callback_query(F.data == "ref:open")
-async def cb_ref_open(call: CallbackQuery, db: Database, cfg: Config, bot_username: str = "") -> None:
-    if not cfg.referral_active:
-        await call.answer("Реферальная программа сейчас отключена.", show_alert=True)
-        return
-    text, link = await _ref_text(db, cfg, call.from_user.id, bot_username)
-    await _edit_or_answer(call, text, referral_kb(link, bot_username, rt.ref_percent))
-    await call.answer()
-
-
-@router.callback_query(F.data == "ref:stats")
-async def cb_ref_stats(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    if not cfg.referral_active:
-        await call.answer("Реферальная программа сейчас отключена.", show_alert=True)
-        return
-    invited = await db.fetchall(
-        "SELECT telegram_id, username, full_name, created_at FROM users WHERE referrer_id = ? "
-        "ORDER BY created_at DESC LIMIT 20",
-        (call.from_user.id,),
-    )
-    paid = await db.scalar(
-        "SELECT COUNT(*) FROM orders o JOIN users u ON u.telegram_id = o.user_id "
-        "WHERE u.referrer_id = ? AND o.status = 'paid'",
-        (call.from_user.id,),
-    )
-    if not invited:
-        await call.answer("Вы пока никого не пригласили.", show_alert=True)
-        return
-    lines = ["📊 <b>Ваши рефералы</b>\n"]
-    for idx, row in enumerate(invited, 1):
-        name = row["full_name"] or (f"@{row['username']}" if row["username"] else str(row["telegram_id"]))
-        lines.append(f"{idx}. {esc(name)} — с {row['created_at'][:10]}")
-    lines.append(f"\n💳 Из них оплатили: <b>{paid}</b>")
-    await call.message.answer("\n".join(lines), reply_markup=back_kb("menu:main"))
     await call.answer()
 
 
