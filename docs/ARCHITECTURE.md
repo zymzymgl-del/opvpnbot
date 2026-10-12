@@ -98,10 +98,10 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 ## 7. Известные технические долги (зафиксированы при реконструкции)
 
-1. **Дублирование** `sub:view/copy/qr/howto` в `msg_my_keys` и `show_subscription` — требует унификации callback'ов (`sub:*` принимает и id подписки, и order_id временного ключа).
+1. ~~**Дублирование** `sub:view/copy/qr/howto` в `msg_my_keys` и `show_subscription`~~ — **неактуально**: отдельного `msg_my_keys`/`show_subscription` в коде нет, подэкраны подписки идут через общие хелперы `_load_own_sub`/`_sub_back_kb`.
 2. ~~**Нет транзакций** в критичных местах~~ — **исправлено**: `complete_order` использует атомарный `db.claim_order_for_payment` (pending → paid под `_lock`, двойная выдача невозможна); `take_key` — один `UPDATE ... RETURNING`; `apply_promo` выполняется под одним захватом `_lock` с единым коммитом. Покрыто проверками 64–71 в `tools/selftest.py` (раздел «Конкурентность и идемпотентность выдачи»).
 3. ~~`poll_yookassa_orders` каждый цикл создаёт новый `YooKassaClient`~~ — **исправлено**: фоновый воркер получает переиспользуемый клиент из `bot.py` (`background_worker(..., yk=yk)` → `poll_yookassa_orders(..., client=yk)`); локальный клиент создаётся только как fallback.
-4. Прямые SQL из хендлеров (например, `SELECT * FROM subscriptions WHERE id = ?`) в обход методов `Database`.
+4. ~~Прямые SQL из хендлеров (например, `SELECT * FROM subscriptions WHERE id = ?`) в обход методов `Database`~~ — **исправлено**: SQL вынесен в методы `Database` (`get_subscription`, `set_order_promo`, `set_order_payment`, `clear_order_promo_reservation`, `count_users`, `users_page`, `find_user_by_username`).
 5. `required_channels` проверяются через `get_chat_member` с кэшем 120 c; при ошибке API — «разрешить» (fail-open, осознанно).
 
 ## 8. Как менять код безопасно

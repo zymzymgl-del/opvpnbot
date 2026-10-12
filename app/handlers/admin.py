@@ -214,7 +214,7 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
     else:
         if order["promo_code"] and int(order["promo_reserved"] or 0):
             await db.release_promo(order["promo_code"], int(order["user_id"]))
-            await db.execute("UPDATE orders SET promo_reserved = 0 WHERE id = ?", (order_id,))
+            await db.clear_order_promo_reservation(order_id)
         await db.set_order_status(order_id, "canceled")
         await safe_send(bot, int(order["user_id"]),
                         f"❌ Заказ #{order_id} отклонён администратором. Напишите в поддержку, если это ошибка.")
@@ -291,18 +291,13 @@ async def msg_claim_lookup(message: Message, state: FSMContext, db: Database, cf
 # Пользователи
 # ---------------------------------------------------------------------------
 async def _render_users(call: CallbackQuery, db: Database, cfg: Config, page: int) -> None:
-    total = int(await db.scalar("SELECT COUNT(*) FROM users"))
+    total = await db.count_users()
     if total == 0:
         await call.answer("Пользователей пока нет.", show_alert=True)
         return
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
-    rows = await db.fetchall(
-        "SELECT u.*, (SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.telegram_id "
-        "AND s.status = 'active' AND s.expires_at > ?) AS subs FROM users u ORDER BY u.last_seen_at DESC "
-        "LIMIT ? OFFSET ?",
-        (to_iso(utcnow()), PAGE_SIZE, page * PAGE_SIZE),
-    )
+    rows = await db.users_page(PAGE_SIZE, page * PAGE_SIZE)
     lines = [f"👥 <b>Пользователи</b> ({total}, стр. {page + 1}/{total_pages})\n"]
     for row in rows:
         name = row["full_name"] or (f"@{row['username']}" if row["username"] else "без имени")
@@ -363,7 +358,7 @@ async def msg_users_find(message: Message, state: FSMContext, db: Database, cfg:
             if order:
                 row = await db.get_user(int(order["user_id"]))
     if row is None and query.startswith("@"):
-        row = await db.fetchone("SELECT * FROM users WHERE username = ?", (query[1:],))
+        row = await db.find_user_by_username(query[1:])
     if row is None:
         await message.answer("Пользователь не найден.", reply_markup=back_kb("adm:users", "◀️ К списку"))
         return

@@ -328,7 +328,7 @@ async def cb_cancel_order(call: CallbackQuery, db: Database, cfg: Config) -> Non
         return
     if order["promo_code"] and int(order["promo_reserved"] or 0):
         await db.release_promo(order["promo_code"], call.from_user.id)
-        await db.execute("UPDATE orders SET promo_reserved = 0 WHERE id = ?", (order_id,))
+        await db.clear_order_promo_reservation(order_id)
     await db.set_order_status(order_id, "canceled")
     await call.message.edit_text("❌ Заказ отменён. Если оплата уже ушла — напишите в поддержку.")
     await call.answer()
@@ -408,10 +408,7 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
         if reserved_code:
             # На заказе был другой промокод — освобождаем его использование.
             await db.release_promo(reserved_code, message.from_user.id)
-        await db.execute(
-            "UPDATE orders SET amount = ?, discount = ?, promo_code = ?, promo_reserved = 1 WHERE id = ?",
-            (new_amount, discount, code, int(order_id)),
-        )
+        await db.set_order_promo(int(order_id), new_amount, discount, code)
     await message.answer(
         f"✅ Промокод <code>{esc(code)}</code> применён!\n"
         f"Скидка: <b>{price(discount, cfg.currency)}</b>, к оплате: <b>{price(new_amount, cfg.currency)}</b>",
@@ -471,8 +468,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             await call.answer("Не удалось создать платёж, попробуйте позже.", show_alert=True)
             await notify_admins(bot, cfg, f"⚠️ Ошибка ЮKassa по заказу #{order_id}: {esc(exc)}")
             return
-        await db.execute("UPDATE orders SET method = 'yookassa', payment_id = ? WHERE id = ?",
-                         (payment["id"], order_id))
+        await db.set_order_payment(order_id, payment["id"], method="yookassa")
         url = (payment.get("confirmation") or {}).get("confirmation_url", "")
         text = (
             f"💳 <b>Оплата заказа #{order_id}</b>\n\n"
@@ -514,7 +510,7 @@ async def cb_keys(call: CallbackQuery, db: Database) -> None:
 @router.callback_query(F.data.startswith("sub:view:"))
 async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
     sub_id = int(call.data.rsplit(":", 1)[1])
-    sub = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+    sub = await db.get_subscription(sub_id)
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
         return
@@ -544,7 +540,7 @@ async def _load_own_sub(call: CallbackQuery, db: Database) -> dict | None:
     alert'ом и возвращает None.
     """
     sub_id = int(call.data.rsplit(":", 1)[1])
-    sub = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+    sub = await db.get_subscription(sub_id)
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
         return None

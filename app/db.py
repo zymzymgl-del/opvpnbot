@@ -301,6 +301,21 @@ class Database:
     async def get_user(self, telegram_id: int) -> Optional[aiosqlite.Row]:
         return await self.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
 
+    async def count_users(self) -> int:
+        return int(await self.scalar("SELECT COUNT(*) FROM users"))
+
+    async def users_page(self, limit: int, offset: int) -> list[aiosqlite.Row]:
+        """Страница пользователей с числом активных подписок (для админ-списка)."""
+        return await self.fetchall(
+            "SELECT u.*, (SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.telegram_id "
+            "AND s.status = 'active' AND s.expires_at > ?) AS subs FROM users u "
+            "ORDER BY u.last_seen_at DESC LIMIT ? OFFSET ?",
+            (to_iso(utcnow()), limit, offset),
+        )
+
+    async def find_user_by_username(self, username: str) -> Optional[aiosqlite.Row]:
+        return await self.fetchone("SELECT * FROM users WHERE username = ?", (username,))
+
     async def set_user_field(self, telegram_id: int, field: str, value: Any) -> None:
         allowed = {"username", "full_name", "trial_used", "is_banned"}
         if field not in allowed:
@@ -397,6 +412,24 @@ class Database:
                 (status, to_iso(utcnow()), order_id),
             )
 
+    async def clear_order_promo_reservation(self, order_id: int) -> None:
+        """Снимает резерв промокода на заказе (при отмене заказа)."""
+        await self.execute("UPDATE orders SET promo_reserved = 0 WHERE id = ?", (order_id,))
+
+    async def set_order_promo(self, order_id: int, amount: int, discount: int, promo_code: str) -> None:
+        """Применяет промокод к заказу: новая сумма/скидка и резерв использования."""
+        await self.execute(
+            "UPDATE orders SET amount = ?, discount = ?, promo_code = ?, promo_reserved = 1 WHERE id = ?",
+            (amount, discount, promo_code, order_id),
+        )
+
+    async def set_order_payment(self, order_id: int, payment_id: str, method: str = "yookassa") -> None:
+        """Фиксирует у заказа способ оплаты и id платежа во внешней системе."""
+        await self.execute(
+            "UPDATE orders SET method = ?, payment_id = ? WHERE id = ?",
+            (method, payment_id, order_id),
+        )
+
     async def claim_order_for_payment(self, order_id: int, payment_id: str | None = None) -> bool:
         """Атомарный переход заказа pending → paid («захват» заказа).
 
@@ -457,6 +490,9 @@ class Database:
         )
 
     # --- subscriptions ---------------------------------------------------
+    async def get_subscription(self, sub_id: int) -> Optional[aiosqlite.Row]:
+        return await self.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+
     async def active_subscription(self, user_id: int) -> Optional[aiosqlite.Row]:
         return await self.fetchone(
             "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' AND expires_at > ? "
