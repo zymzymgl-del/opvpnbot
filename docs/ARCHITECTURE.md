@@ -24,7 +24,7 @@ app/services/subs.py       — бизнес-логика: grant/complete/expired
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
 tools/integration_test.py  — маршрутизация апдейтов через Dispatcher.feed_update
-install.sh / deploy/       — установка на VPS: systemd-служба dfvpnbot (install.sh --update/--uninstall/--no-service)
+install.sh / deploy/       — установка на VPS: systemd-служба opvpnbot (install.sh --update/--uninstall/--no-service)
 Dockerfile / docker-compose.yml — контейнерный запуск (непривилегированный пользователь, том под data/)
 requirements-dev.txt       — инструменты разработки (ruff, pytest)
 ```
@@ -89,7 +89,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 ## 5. Платежи
 
 * **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
-* **ЮMoney** (`YooMoneyClient`): форма quickpay с `label=dfvpn-order-{id}`; автоподтверждение поиском входящей операции в operation-history по label и сумме. Домен не нужен.
+* **ЮMoney** (`YooMoneyClient`): форма quickpay с `label=opvpnbot-order-{id}`; автоподтверждение поиском входящей операции в operation-history по label и сумме. Домен не нужен.
 * **Telegram Stars**: `send_invoice(currency="XTR", provider_token="")`, payload `order:{id}`; обработка `pre_checkout_query` / `successful_payment`; возврат — `refund_star_payment`.
 * **Баланс**: атомарный `UPDATE users SET balance = balance - ?`, при сбое выдачи — автоматический возврат.
 * **Manual**: заказ создаётся, админ подтверждает через `adm:order:approve` → `complete_order(payment_id="manual:{admin_id}")`.

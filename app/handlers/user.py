@@ -9,7 +9,14 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, PreCheckoutQuery
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    PreCheckoutQuery,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import Config
 from app.db import Database, from_iso
@@ -49,6 +56,7 @@ from app.utils import (
     fmt_dt,
     human_left,
     make_qr_png,
+    pick_link,
     price,
 )
 
@@ -659,32 +667,69 @@ async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("sub:copy:"))
-async def cb_sub_copy(call: CallbackQuery, db: Database) -> None:
+async def _load_own_sub(call: CallbackQuery, db: Database) -> dict | None:
+    """Возвращает строку подписки по callback ``sub:<action>:<id>``.
+
+    Если подписка не найдена или принадлежит другому пользователю — отвечает
+    alert'ом и возвращает None.
+    """
     sub_id = int(call.data.rsplit(":", 1)[1])
     sub = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
+        return None
+    return sub
+
+
+def _sub_back_kb(sub_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура возврата для подэкранов подписки (как у «Как подключиться»)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀️ К подписке", callback_data=f"sub:view:{sub_id}")
+    builder.button(text="◀️ К подпискам", callback_data="menu:keys")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("sub:copy:"))
+async def cb_sub_copy(call: CallbackQuery, db: Database) -> None:
+    sub = await _load_own_sub(call, db)
+    if sub is None:
         return
-    link = sub["sub_url"] or sub["vpn_key"] or ""
-    await call.message.answer(f"<code>{esc(link)}</code>")
-    await call.answer("Скопировано 👆")
+    link = pick_link(sub)
+    if not link:
+        await call.answer("Ссылка ещё не готова.", show_alert=True)
+        return
+    # Логика как у «Как подключиться»: редактируем текущее сообщение (одно окно),
+    # добавляем возврат «◀️ К подписке». Ссылка — моноширинным блоком, копируется
+    # тапом по ней (Telegram копирует <code>-текст нажатием).
+    text = (
+        f"🔗 <b>Ссылка подписки #{sub['id']}</b>\n\n"
+        f"<code>{esc(link)}</code>\n\n"
+        "Нажмите на ссылку, чтобы скопировать, либо удержите сообщение и выберите «Копировать»."
+    )
+    await _edit_or_answer(call, text, _sub_back_kb(int(sub["id"])))
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("sub:qr:"))
 async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
     from aiogram.types import BufferedInputFile
 
-    sub_id = int(call.data.rsplit(":", 1)[1])
-    sub = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
-    if sub is None or int(sub["user_id"]) != call.from_user.id:
-        await call.answer("Подписка не найдена.", show_alert=True)
+    sub = await _load_own_sub(call, db)
+    if sub is None:
         return
     link = sub["sub_url"] or sub["vpn_key"] or ""
     png = make_qr_png(link)
     if png is None:
         await call.answer("Генерация QR недоступна (не установлен модуль qrcode).", show_alert=True)
         return
+    # Как и «Как подключиться», переключаемся в отдельное окно с кнопкой возврата;
+    # сам QR приходит новым сообщением (фото отредактировать нельзя).
+    await _edit_or_answer(
+        call,
+        f"📷 <b>QR-код подписки #{sub['id']}</b>\n\nОтправлен ниже сообщением — отсканируйте его в приложении VPN.",
+        _sub_back_kb(int(sub["id"])),
+    )
     await call.message.answer_photo(BufferedInputFile(png, filename="vpn-qr.png"),
                                     caption="📷 Отсканируйте QR-код в приложении VPN")
     await call.answer()
@@ -692,20 +737,54 @@ async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data.startswith("sub:howto:"))
 async def cb_sub_howto(call: CallbackQuery, db: Database) -> None:
-    sub_id = int(call.data.rsplit(":", 1)[1])
-    sub = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
-    if sub is None or int(sub["user_id"]) != call.from_user.id:
-        await call.answer("Подписка не найдена.", show_alert=True)
+    sub = await _load_own_sub(call, db)
+    if sub is None:
         return
     await _edit_or_answer(call, apps_instructions(sub["vpn_key"] or "", sub["sub_url"], int(sub["devices"])),
-                          back_kb(f"sub:view:{sub_id}", "◀️ К подписке"))
+                          back_kb(f"sub:view:{sub['id']}", "◀️ К подписке"))
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("sub:renew:"))
 async def cb_sub_renew(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    await _show_plans(call, db, cfg)
-    await call.answer("При продлении конфиг останется тем же 👍")
+    sub = await _load_own_sub(call, db)
+    if sub is None:
+        return
+    # Логика как у «Как подключиться»: редактируем текущее сообщение и даём
+    # возврат «◀️ К подписке» (тарифы открываются поверх карточки подписки).
+    user_id = call.from_user.id
+    existing = await db.active_subscription(user_id)
+    if existing is not None and not renewal_available(existing, cfg):
+        window = renewal_window_days(cfg)
+        opens_at = from_iso(existing["expires_at"]) - timedelta(days=window)
+        text = (
+            "⏳ <b>Продление пока недоступно</b>\n\n"
+            f"Продлить подписку можно за <b>{window} дн.</b> до её окончания — "
+            "мы обязательно напомним.\n\n"
+            f"Сейчас осталось: <b>{human_left(existing['expires_at'])}</b> "
+            f"(до {fmt_dt(existing['expires_at'])}).\n"
+            f"Окно продления откроется <b>{fmt_dt(opens_at)}</b>."
+        )
+        await _edit_or_answer(call, text, _sub_back_kb(int(sub["id"])))
+        await call.answer()
+        return
+    plans = await db.active_plans()
+    if not plans:
+        await _edit_or_answer(
+            call,
+            "😔 Сейчас нет доступных тарифов. Загляните позже или напишите в поддержку.",
+            _sub_back_kb(int(sub["id"])),
+        )
+        await call.answer()
+        return
+    text = (
+        "🔄 <b>Продление подписки</b>\n\n"
+        f"Тариф: <b>{esc(sub['plan_code'])}</b>, действует до: <b>{fmt_dt(sub['expires_at'])}</b>.\n"
+        f"Оплата: {_methods_line(cfg)}.\n\n"
+        "Выберите тариф — конфиг останется тем же, срок продлевается."
+    )
+    await _edit_or_answer(call, text, plans_kb(plans, cfg.currency))
+    await call.answer()
 
 
 # ---------------------------------------------------------------------------

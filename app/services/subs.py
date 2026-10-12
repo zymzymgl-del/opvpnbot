@@ -448,17 +448,17 @@ async def run_db_backup(cfg: Config, db: Database) -> str | None:
         return None
     backup_dir = Path(cfg.db_path).parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backups = sorted(backup_dir.glob("dfvpn-*.sqlite3"))
+    backups = sorted(backup_dir.glob("opvpnbot-*.sqlite3"))
     if backups:
         newest = backups[-1]
         mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc)
         if utcnow() - mtime < timedelta(minutes=cfg.backup_interval_minutes):
             return None
     stamp = utcnow().strftime("%Y%m%d-%H%M%S")
-    dest = backup_dir / f"dfvpn-{stamp}.sqlite3"
+    dest = backup_dir / f"opvpnbot-{stamp}.sqlite3"
     await db.backup(str(dest))
     # Ротация: удаляем старые сверх лимита.
-    created = sorted(backup_dir.glob("dfvpn-*.sqlite3"))
+    created = sorted(backup_dir.glob("opvpnbot-*.sqlite3"))
     for old in created[: max(0, len(created) - cfg.backup_keep)]:
         try:
             old.unlink()

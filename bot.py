@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPVPN — точка входа.
 
-Запуск:  python bot.py     (или systemd-сервис dfvpnbot, см. install.sh)
+Запуск:  python bot.py     (или systemd-сервис opvpnbot, см. install.sh)
 
 Порядок работы:
 1. читаем .env, проверяем конфигурацию;
@@ -42,7 +42,7 @@ from app.services.payments import YooKassaClient, YooMoneyClient
 from app.services.subs import background_worker, notify_admins
 from app.webhook import start_webhook_server
 
-log = logging.getLogger("dfvpnbot")
+log = logging.getLogger("opvpnbot")
 
 
 def setup_logging(level: str, log_file: str) -> None:
