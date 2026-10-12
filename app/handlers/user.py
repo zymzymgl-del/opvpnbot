@@ -268,6 +268,17 @@ async def cb_buy(call: CallbackQuery, db: Database, cfg: Config) -> None:
     if reuse is not None:
         order_id = int(reuse["id"])
     else:
+        # Анти-абьюз: не даём копить неоплаченные счета (защита от спама заказами).
+        limit = cfg.max_pending_orders
+        if limit > 0:
+            pending = await db.count_pending_orders(call.from_user.id)
+            if pending >= limit:
+                await call.answer(
+                    f"⚠️ У вас уже {pending} неоплаченных заказов. "
+                    "Оплатите или отмените их (в истории заказов), затем оформите новый.",
+                    show_alert=True,
+                )
+                return
         order_id = await db.create_order(
             user_id=call.from_user.id, plan_code=code, amount=int(plan["price"]),
             base_amount=int(plan["price"]), promo_code=None, method="none", kind="subscription",

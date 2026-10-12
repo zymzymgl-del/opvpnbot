@@ -120,6 +120,7 @@ class Config:
     trial_devices: int
     trial_traffic_gb: int
     trial_panel_hint: str
+    max_pending_orders: int
 
     # --- Оплата ---
     payment_methods: tuple[str, ...]
@@ -197,6 +198,7 @@ def load_config() -> Config:
         trial_devices=_int("TRIAL_DEVICES", 1),
         trial_traffic_gb=_int("TRIAL_TRAFFIC_GB", 10),
         trial_panel_hint=_str("TRIAL_PANEL_HINT", "trial"),
+        max_pending_orders=_int("MAX_PENDING_ORDERS", 5),
         payment_methods=_list("PAYMENT_METHODS", ("yookassa",)),
         yookassa_shop_id=_str("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=_str("YOOKASSA_SECRET_KEY"),

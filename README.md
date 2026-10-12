@@ -126,6 +126,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
 | `PAYMENT_METHODS`                                  | `yookassa`                                                                                   |
 | `TRIAL_ENABLED`, `TRIAL_DAYS`                      | Пробный период                                                                               |
+| `MAX_PENDING_ORDERS`                               | Максимум неоплаченных заказов на пользователя (0 — без лимита)                              |
 | `REQUIRED_CHANNELS`                                | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала)                         |
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |

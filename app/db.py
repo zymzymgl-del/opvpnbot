@@ -444,6 +444,12 @@ class Database:
             "SELECT * FROM orders WHERE status = 'pending' ORDER BY id DESC LIMIT ?", (limit,)
         )
 
+    async def count_pending_orders(self, user_id: int) -> int:
+        """Число неоплаченных заказов пользователя (для анти-абьюза)."""
+        return int(await self.scalar(
+            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'pending'", (user_id,)
+        ))
+
     async def stale_orders(self, hours: int) -> list[aiosqlite.Row]:
         border = to_iso(utcnow() - timedelta(hours=hours))
         return await self.fetchall(

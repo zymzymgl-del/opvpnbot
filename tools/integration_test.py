@@ -32,6 +32,7 @@ os.environ.update({
     "TRIAL_DAYS": "3",
     "CLAIM_ENABLED": "true",
     "CLAIM_SECRET": "it-secret",
+    "MAX_PENDING_ORDERS": "5",
     "THROTTLING_RATE": "0",  # в тесте не тормозим
     "LOG_LEVEL": "ERROR",
     "LOG_FILE": str(Path(TMP) / "bot.log"),
@@ -337,6 +338,20 @@ async def run() -> None:
     await dp.feed_update(bot, make_message(999, "/start ref_555", 18))
     expect("реферальная метка в /start игнорируется",
            "Приглашайте" not in sent("message"), sent("message")[:120])
+
+    print("\n4b. Анти-абьюз: лимит неоплаченных заказов")
+    abuse_user = 6100
+    await db.ensure_user(abuse_user, "abuser", "Абьюзер")
+    for _ in range(5):
+        await db.create_order(abuse_user, "1m", 150, 150, None, "none")
+    CALLBACK_ANSWERS.clear()
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(abuse_user, "buy:3m", 30))
+    expect("превышение лимита неоплаченных заказов заблокировано",
+           any("неоплаченных" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
+    abuse_orders = int(await db.scalar(
+        "SELECT COUNT(*) FROM orders WHERE user_id = ?", (abuse_user,)))
+    expect("новый заказ при превышении лимита не создан", abuse_orders == 5, str(abuse_orders))
 
     print("\n5. Привязка существующего клиента панели (QR/claim)")
     import app.services.panels as panels_mod
