@@ -71,7 +71,7 @@ server {
 
 3. В кабинете ЮKassa: **Интеграция → HTTP-уведомления** → добавьте событие `payment.succeeded`
    с адресом `https://bot.example.com/yookassa/webhook`.
-4. Перезапустите бота: `systemctl restart dfvpnbot`. Проверить, что порт слушается:
+4. Перезапустите бота: `systemctl restart opvpnbot`. Проверить, что порт слушается:
    `curl -s http://127.0.0.1:8080/healthz`.
 
 ### Как бот защищается от подделки уведомлений

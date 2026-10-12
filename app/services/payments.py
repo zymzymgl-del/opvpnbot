@@ -186,7 +186,7 @@ class YooMoneyClient:
 
     @staticmethod
     def label_for(order_id: int) -> str:
-        return f"dfvpn-order-{order_id}"
+        return f"opvpnbot-order-{order_id}"
 
     def form_url(self, amount_rub: int, order_id: int) -> str:
         """Ссылка на платёжную форму ЮMoney с суммой и меткой заказа."""

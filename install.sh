@@ -9,7 +9,7 @@
 #      sudo bash install.sh --update        обновить код и перезапустить
 #      sudo bash install.sh --uninstall     удалить службу (база и .env останутся)
 #      sudo bash install.sh --yes           без вопросов, значения из переменных окружения
-#      sudo bash install.sh --dir /srv/dfvpnbot --no-service
+#      sudo bash install.sh --dir /srv/opvpnbot --no-service
 #      sudo bash install.sh --help
 #
 #  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
@@ -19,9 +19,9 @@
 # ============================================================================
 set -euo pipefail
 
-APP_NAME="dfvpnbot"
-SERVICE_USER="dfvpn"
-DEFAULT_DIR="/opt/df-vpn-bot"
+APP_NAME="opvpnbot"
+SERVICE_USER="opvpn"
+DEFAULT_DIR="/srv/opvpnbot"
 UNIT_PATH="/etc/systemd/system/${APP_NAME}.service"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -51,13 +51,13 @@ OPVPN — установщик
   --uninstall         остановить и удалить systemd-службу (каталог, база и .env остаются)
   --yes               без интерактивных вопросов; значения берутся из переменных окружения
   --no-service        не создавать systemd-службу (только venv + .env)
-  --dir <путь>        каталог установки (по умолчанию /opt/df-vpn-bot)
+  --dir <путь>        каталог установки (по умолчанию /srv/opvpnbot)
   -h, --help          эта справка
 
 Примеры:
   sudo bash install.sh
-  sudo bash install.sh --dir /srv/dfvpnbot
-  sudo bash install.sh --no-service --dir "$HOME/dfvpnbot"
+  sudo bash install.sh --dir /srv/opvpnbot
+  sudo bash install.sh --no-service --dir "$HOME/opvpnbot"
   sudo bash install.sh --update
   sudo bash install.sh --uninstall
 EOF

@@ -169,7 +169,7 @@ async def cb_panel_test(call: CallbackQuery, db: Database, cfg: Config) -> None:
 @router.callback_query(F.data == "adm:backup")
 async def cb_backup(call: CallbackQuery, db: Database, cfg: Config) -> None:
     try:
-        document = FSInputFile(cfg.db_path, filename=f"dfvpnbot-backup-{utcnow():%Y%m%d-%H%M}.sqlite3")
+        document = FSInputFile(cfg.db_path, filename=f"opvpnbot-backup-{utcnow():%Y%m%d-%H%M}.sqlite3")
         await call.message.answer_document(document, caption="💾 Резервная копия базы данных")
     except Exception as exc:
         await call.answer(f"Не удалось отправить файл: {exc}", show_alert=True)

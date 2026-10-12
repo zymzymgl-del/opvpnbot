@@ -4,8 +4,8 @@
 Переключение не требует изменений кода — достаточно поменять значение и перезапустить бота:
 
 ```bash
-sudo nano /opt/df-vpn-bot/.env      # VPN_PANEL=xui
-sudo systemctl restart dfvpnbot
+sudo nano /srv/opvpnbot/.env      # VPN_PANEL=xui
+sudo systemctl restart opvpnbot
 ```
 
 Проверить связь с панелью можно из бота: `/admin` → 🧪 Проверить панель.

@@ -4,28 +4,28 @@
 #   docker compose up -d --build
 #   docker compose logs -f
 #
-# Данные (SQLite, логи, бэкапы) хранятся в именованном томе dfvpn-data,
+# Данные (SQLite, логи, бэкапы) хранятся в именованном томе opvpnbot-data,
 # поэтому переживают пересоздание контейнера.
 services:
-  dfvpnbot:
+  opvpnbot:
     build: .
     image: opvpn:latest
-    container_name: dfvpnbot
+    container_name: opvpnbot
     restart: unless-stopped
     env_file:
       - .env
     environment:
       # Внутри контейнера данные всегда в /app/data (точка монтирования тома).
-      DB_PATH: /app/data/dfvpnbot.sqlite3
+      DB_PATH: /app/data/opvpnbot.sqlite3
       LOG_FILE: /app/data/bot.log
     volumes:
-      - dfvpn-data:/app/data
+      - opvpnbot-data:/app/data
     # Если включены вебхуки ЮKassa и порт должен быть доступен снаружи — раскомментируйте:
     # ports:
     #   - "8080:8080"
 
 volumes:
-  dfvpn-data:
+  opvpnbot-data:
 
 # Альтернатива именованному тому — каталог рядом с compose-файлом.
 # ВНИМАНИЕ: владельцем каталога должен быть UID контейнера (10001), иначе бот

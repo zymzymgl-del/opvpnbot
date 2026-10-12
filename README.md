@@ -5,7 +5,7 @@
 
 
 
-Установщик спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `dfvpnbot` и запустит бота с автозапуском.
+Установщик спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `opvpnbot` и запустит бота с автозапуском.
 
 Полезные режимы:
 
@@ -13,15 +13,15 @@
 sudo bash install.sh --update      # обновить код и перезапустить
 sudo bash install.sh --uninstall   # удалить службу (база и .env останутся)
 sudo bash install.sh --yes         # без вопросов, значения из переменных окружения
-sudo bash install.sh --dir /srv/dfvpnbot --no-service   # свой каталог, без systemd
+sudo bash install.sh --dir /srv/opvpnbot --no-service   # свой каталог, без systemd
 ```
 
 Управление после установки:
 
 ```bash
-systemctl status dfvpnbot
-journalctl -u dfvpnbot -f     # живые логи
-systemctl restart dfvpnbot
+systemctl status opvpnbot
+journalctl -u opvpnbot -f     # живые логи
+systemctl restart opvpnbot
 ```
 
 ## 🐳 Установка через Docker
@@ -171,7 +171,7 @@ Dockerfile                 образ для Docker
 docker-compose.yml         запуск бота в контейнере (том для data/)
 requirements-dev.txt       инструменты разработки (не обязательны)
 .env.example               образец конфигурации → копируется в .env
-deploy/dfvpnbot.service    образец systemd-юнита
+deploy/opvpnbot.service    образец systemd-юнита
 docs/                      инструкции по панелям и оплате
 ```
 
@@ -181,7 +181,7 @@ docs/                      инструкции по панелям и опла�
 
 **«Пул ключей пуст».** Откройте `/admin` → 🔑 Ключи → ➕ Добавить ключи и вставьте конфиги (по одному в строке) — либо переключитесь на панель `xui`/`marzban`.
 
-**Как обновить бота?** `sudo bash install.sh --update` (код скачается заново, `.env` и база сохранятся) или `git pull && systemctl restart dfvpnbot`.
+**Как обновить бота?** `sudo bash install.sh --update` (код скачается заново, `.env` и база сохранятся) или `git pull && systemctl restart opvpnbot`.
 
 **Как забэкапить базу?** `/admin` → 💾 Бэкап базы — бот пришлёт файл SQLite. Данные и логи лежат в `data/`.
 

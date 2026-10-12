@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-TMP = tempfile.mkdtemp(prefix="dfvpnbot-it-")
+TMP = tempfile.mkdtemp(prefix="opvpnbot-it-")
 os.environ.update({
     "BOT_TOKEN": "123456:TEST-TOKEN",
     "ADMIN_IDS": "777",
@@ -89,7 +89,7 @@ def install_stubs(bot: Bot) -> None:
         return None
 
     async def get_me(self, *a, **kw):
-        return User(id=1, is_bot=True, first_name="TestBot", username="dfvpn_test_bot")
+        return User(id=1, is_bot=True, first_name="TestBot", username="opvpnbot_test_bot")
 
     Bot.__call__ = fake_call            # type: ignore[method-assign]
     Bot.get_me = get_me                 # type: ignore[method-assign]
@@ -152,7 +152,7 @@ async def run() -> None:
 
     ym.find_payment = fake_find  # type: ignore[assignment]
     dp = build_dispatcher(cfg, db, bot, None, ym)
-    dp["bot_username"] = "dfvpn_test_bot"
+    dp["bot_username"] = "opvpnbot_test_bot"
 
     print("\n1. Пользовательский поток")
     OUT.clear()

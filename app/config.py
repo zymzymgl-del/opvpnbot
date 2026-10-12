@@ -276,7 +276,7 @@ def load_config() -> Config:
         webhook_path=_str("WEBHOOK_PATH", "/yookassa/webhook"),
         webhook_public_url=_str("WEBHOOK_PUBLIC_URL"),
         webhook_trust_proxy=_bool("WEBHOOK_TRUST_PROXY", False),
-        db_path=_str("DB_PATH", str(BASE_DIR / "data" / "dfvpnbot.sqlite3")),
+        db_path=_str("DB_PATH", str(BASE_DIR / "data" / "opvpnbot.sqlite3")),
         log_level=_str("LOG_LEVEL", "INFO").upper(),
         log_file=_str("LOG_FILE", str(BASE_DIR / "data" / "bot.log")),
         auto_disable_expired=_bool("AUTO_DISABLE_EXPIRED", True),

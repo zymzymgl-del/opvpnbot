@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-TMP = tempfile.mkdtemp(prefix="dfvpnbot-selftest-")
+TMP = tempfile.mkdtemp(prefix="opvpnbot-selftest-")
 os.environ.update({
     "BOT_TOKEN": "123456:TEST-TOKEN",
     "ADMIN_IDS": "777",
@@ -413,11 +413,11 @@ async def run() -> None:
     ymc = YooMoneyClient(ym_cfg)
     url = ymc.form_url(150, 7)
     check("форма содержит кошелёк", "receiver=410011234567890" in url, url)
-    check("форма содержит label заказа", "label=dfvpn-order-7" in url, url)
+    check("форма содержит label заказа", "label=opvpnbot-order-7" in url, url)
     check("форма содержит сумму", "sum=150.00" in url, url)
 
     session = FakeSession([(200, {"operations": [
-        {"direction": "in", "status": "success", "label": "dfvpn-order-7",
+        {"direction": "in", "status": "success", "label": "opvpnbot-order-7",
          "amount": "150.00", "operation_id": 987654},
     ]})])
     async def fake_session():
@@ -427,13 +427,13 @@ async def run() -> None:
     check("входящий перевод найден по label", found == "987654", str(found))
 
     session.responses.append((200, {"operations": [
-        {"direction": "in", "status": "success", "label": "dfvpn-order-7",
+        {"direction": "in", "status": "success", "label": "opvpnbot-order-7",
          "amount": "100.00", "operation_id": 1},
     ]}))
     check("перевод с чужой суммой отклонён", await ymc.find_payment(7, 150) is None)
 
     session.responses.append((200, {"operations": [
-        {"direction": "out", "status": "success", "label": "dfvpn-order-7",
+        {"direction": "out", "status": "success", "label": "opvpnbot-order-7",
          "amount": "150.00", "operation_id": 2},
     ]}))
     check("исходящий перевод игнорируется", await ymc.find_payment(7, 150) is None)
@@ -557,7 +557,7 @@ async def run() -> None:
         if pn:
             made.append(pn)
     bdir = Path(cfg.db_path).parent / "backups"
-    remaining = sorted(bdir.glob("dfvpn-*.sqlite3"))
+    remaining = sorted(bdir.glob("opvpnbot-*.sqlite3"))
     check("ротация держит не больше backup_keep копий", len(remaining) <= 2, str([p.name for p in remaining]))
     check("копия читается как SQLite и содержит таблицы", _sqlite_backup_ok(remaining[-1] if remaining else Path(p1)))
 
@@ -585,9 +585,9 @@ async def run() -> None:
     panels_mod._panel = StubXuiPanel(legacy)  # type: ignore[attr-defined]
     try:
         token = claim_token("SUBID-123", "selftest-secret")
-        link = build_claim_link("dfvpn_test_bot", "SUBID-123", "selftest-secret")
+        link = build_claim_link("opvpnbot_test_bot", "SUBID-123", "selftest-secret")
         check("ссылка привязки ведёт на бота и подписана",
-              link.startswith("https://t.me/dfvpn_test_bot?start=claim_")
+              link.startswith("https://t.me/opvpnbot_test_bot?start=claim_")
               and not token_expired(link.rsplit("claim_", 1)[1]))
         exp_custom, _sig = parse_token(claim_token("SUBID-123", "selftest-secret", ttl=3600))
         check("токен: срок задаётся ttl", abs(exp_custom - (int(time.time()) + 3600)) <= 5, str(exp_custom))
