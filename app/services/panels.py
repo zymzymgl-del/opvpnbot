@@ -353,7 +353,8 @@ class XuiPanel(BasePanel):
             panel_username=email,
         )
 
-    async def _extend_client_clients_api(self, email: str, days: int, devices: int | None = None) -> bool:
+    async def _extend_client_clients_api(self, email: str, days: int, devices: int | None = None,
+                                         traffic_gb: int | None = None) -> bool:
         try:
             client = await self._get_client(email)
         except PanelError:
@@ -368,6 +369,10 @@ class XuiPanel(BasePanel):
         payload["enable"] = True
         if devices is not None:
             payload["limitIp"] = max(1, devices)
+        # Трафик (totalGB) обновляем только если вызывающий явно его передал —
+        # иначе смена тарифа не меняла лимит в панели (см. extend_client).
+        if traffic_gb is not None:
+            payload["totalGB"] = max(0, traffic_gb) * 1024 ** 3
         await self._api(
             f"/clients/update/{quote(email, safe='')}",
             method="POST",
@@ -435,7 +440,8 @@ class XuiPanel(BasePanel):
     async def extend_client(self, *, panel_username: str, days: int,
                             devices: int | None = None, traffic_gb: int | None = None) -> bool:
         if await self._uses_clients_api():
-            return await self._extend_client_clients_api(panel_username, days, devices=devices)
+            return await self._extend_client_clients_api(panel_username, days, devices=devices,
+                                                          traffic_gb=traffic_gb)
         found = await self._find_client(panel_username)
         if not found:
             return False
@@ -446,6 +452,10 @@ class XuiPanel(BasePanel):
         if devices is not None:
             client["limitIp"] = max(1, devices)
             client.pop("limitHwid", None)
+        # totalGB = 0 в 3x-ui означает «безлимит», поэтому traffic_gb=0
+        # тоже применяем (переход на безлимитный тариф), а None — не трогаем.
+        if traffic_gb is not None:
+            client["totalGB"] = max(0, traffic_gb) * 1024 ** 3
         await self._api(
             f"/inbounds/updateClient/{client['id']}",
             method="POST",
