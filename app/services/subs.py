@@ -384,25 +384,6 @@ async def cancel_stale_orders(db: Database, hours: int) -> None:
         await db.set_order_status(int(order["id"]), "canceled")
 
 
-async def poll_yoomoney_orders(bot: Bot, cfg: Config, db: Database, ym) -> None:
-    """Автопроверка переводов ЮMoney по label заказа."""
-    if ym is None:
-        return
-    rows = await db.fetchall(
-        "SELECT id, amount FROM orders WHERE status = 'pending' AND method = 'yoomoney' "
-        "AND kind = 'subscription'"
-    )
-    for row in rows:
-        op_id = await ym.find_payment(row["id"], int(row["amount"]))
-        if not op_id:
-            continue
-        try:
-            await complete_order(bot, cfg, db, row["id"], payment_id=op_id)
-            log.info("Заказ #%s оплачен через ЮMoney (%s)", row["id"], op_id)
-        except PanelError as exc:
-            await notify_admins(bot, cfg, f"⚠️ ЮMoney по заказу #{row['id']}: оплата есть, выдача не удалась: {exc}")
-
-
 async def run_db_backup(cfg: Config, db: Database) -> str | None:
     """Очередной бэкап БД с ротацией (хранит последние cfg.backup_keep копий).
 
@@ -432,14 +413,13 @@ async def run_db_backup(cfg: Config, db: Database) -> str | None:
     return str(dest)
 
 
-async def background_worker(bot: Bot, cfg: Config, db: Database, ym=None, yk=None) -> None:
+async def background_worker(bot: Bot, cfg: Config, db: Database, yk=None) -> None:
     """Единый цикл фоновых задач: напоминания, истечение, проверка платежей."""
     while True:
         try:
             await process_expired(bot, cfg, db)
             await send_reminders(bot, cfg, db)
             await poll_yookassa_orders(bot, cfg, db, client=yk)
-            await poll_yoomoney_orders(bot, cfg, db, ym)
             await cancel_stale_orders(db, cfg.orders_ttl_hours)
             await run_db_backup(cfg, db)
         except asyncio.CancelledError:

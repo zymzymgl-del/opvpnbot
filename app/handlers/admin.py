@@ -211,7 +211,7 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
 
     if action == "approve":
         try:
-            await complete_order(bot, cfg, db, order_id, payment_id=f"manual:{call.from_user.id}")
+            await complete_order(bot, cfg, db, order_id, payment_id=f"admin:{call.from_user.id}")
         except PanelError as exc:
             await call.answer(f"Не удалось выдать ключ: {exc}", show_alert=True)
             return

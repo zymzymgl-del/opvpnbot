@@ -26,9 +26,6 @@ STATUS_RU = {
 
 METHOD_RU = {
     "yookassa": "карта/СБП (ЮKassa)",
-    "stars": "Telegram Stars",
-    "manual": "вручную",
-    "yoomoney": "ЮMoney",
 }
 
 

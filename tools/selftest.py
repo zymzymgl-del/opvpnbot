@@ -28,7 +28,7 @@ os.environ.update({
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "test.sqlite3"),
     "VPN_PANEL": "pool",
-    "PAYMENT_METHODS": "stars,manual",
+    "PAYMENT_METHODS": "yookassa",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "2",
     "LOG_FILE": str(Path(TMP) / "bot.log"),
@@ -87,12 +87,6 @@ class FakeBot:
     async def send_photo(self, chat_id, photo=None, caption=None, **kw):
         self.photos.append(int(chat_id))
         return None
-
-    async def send_invoice(self, **kw):
-        return None
-
-    async def refund_star_payment(self, **kw):
-        return True
 
     def last_text_for(self, chat_id: int) -> str:
         for cid, text in reversed(self.messages):
@@ -184,7 +178,7 @@ async def run() -> None:
 
     print("\n4. Заказы и оплата")
     await db.ensure_user(3001, "buyer", "Покупатель")
-    order_id = await db.create_order(3001, "1m", 299, 299, None, "stars")
+    order_id = await db.create_order(3001, "1m", 299, 299, None, "yookassa")
     await complete_order(bot, cfg, db, order_id, payment_id="star-charge-1")
     order = await db.get_order(order_id)
     check("заказ помечен оплаченным", order["status"] == "paid")
@@ -293,7 +287,7 @@ async def run() -> None:
     print("\n9. Клавиатуры и статистика")
     check("главное меню собирается", main_menu(True, True) is not None)
     check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
-    check("выбор способа оплаты собирается", payment_methods_kb(["stars", "manual"], 1) is not None)
+    check("выбор способа оплаты собирается", payment_methods_kb(["yookassa"], 1) is not None)
     stats = await db.stats()
     check("статистика считается", stats["users_total"] >= 3 and stats["revenue_total"] >= 299, str(stats["revenue_total"]))
 
@@ -343,7 +337,7 @@ async def run() -> None:
     client = YooKassaClient(yk_cfg)
 
     session = FakeSession([(200, {"id": "pay-1", "status": "pending",
-                                  "confirmation": {"confirmation_url": "https://yoomoney.ru/checkout/1"}})])
+                                  "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/1"}})])
     async def fake_session():
         return session
     client._get_session = fake_session  # type: ignore[assignment]
@@ -357,7 +351,7 @@ async def run() -> None:
     check("return_url из конфига", payload["confirmation"]["return_url"] == "https://t.me/test_bot")
     check("metadata содержит заказ", payload["metadata"]["order_id"] == "1", str(payload["metadata"]))
     check("Idempotence-Key передан", bool(headers.get("Idempotence-Key")), str(headers))
-    check("confirmation_url получен", payment["confirmation"]["confirmation_url"].startswith("https://yoomoney.ru"))
+    check("confirmation_url получен", payment["confirmation"]["confirmation_url"].startswith("https://yookassa.ru"))
 
     session.responses.append((200, {"status": "succeeded", "paid": True, "amount": {"value": "150.00"}}))
     check("успешный платёж подтверждён", await client.is_paid("pay-1", 150) is True)
@@ -378,45 +372,6 @@ async def run() -> None:
     check("диапазоны IP заданы", len(YOOKASSA_NETS) >= 6)
 
 
-    print("\n12. ЮMoney: форма и проверка перевода")
-    from app.services.payments import YooMoneyClient
-
-    os.environ["PAYMENT_METHODS"] = "yoomoney,stars,manual"
-    os.environ["YOOMONEY_WALLET"] = "410011234567890"
-    os.environ["YOOMONEY_TOKEN"] = "test-yoomoney-token"
-    ym_cfg = load_config()
-    check("yoomoney_enabled с токеном", ym_cfg.yoomoney_enabled)
-    ymc = YooMoneyClient(ym_cfg)
-    url = ymc.form_url(150, 7)
-    check("форма содержит кошелёк", "receiver=410011234567890" in url, url)
-    check("форма содержит label заказа", "label=opvpnbot-order-7" in url, url)
-    check("форма содержит сумму", "sum=150.00" in url, url)
-
-    session = FakeSession([(200, {"operations": [
-        {"direction": "in", "status": "success", "label": "opvpnbot-order-7",
-         "amount": "150.00", "operation_id": 987654},
-    ]})])
-    async def fake_session():
-        return session
-    ymc._get_session = fake_session  # type: ignore[assignment]
-    found = await ymc.find_payment(7, 150)
-    check("входящий перевод найден по label", found == "987654", str(found))
-
-    session.responses.append((200, {"operations": [
-        {"direction": "in", "status": "success", "label": "opvpnbot-order-7",
-         "amount": "100.00", "operation_id": 1},
-    ]}))
-    check("перевод с чужой суммой отклонён", await ymc.find_payment(7, 150) is None)
-
-    session.responses.append((200, {"operations": [
-        {"direction": "out", "status": "success", "label": "opvpnbot-order-7",
-         "amount": "150.00", "operation_id": 2},
-    ]}))
-    check("исходящий перевод игнорируется", await ymc.find_payment(7, 150) is None)
-
-    session.responses.append((401, {"error": "unauthorized"}))
-    check("ошибка API ЮMoney обрабатывается", await ymc.find_payment(7, 150) is None)
-
     check("профиль содержит кнопку истории заказов", "orders:history" in profile_kb().inline_keyboard.__repr__())
     check("в профиле нет кнопок баланса/рефералки",
           "topup:start" not in profile_kb().inline_keyboard.__repr__()
@@ -427,7 +382,7 @@ async def run() -> None:
     await db.ensure_user(5001, "carol", "Кэрол")
     await db.add_keys(["vless://race-key-1@example.com:443#race1",
                        "vless://race-key-2@example.com:443#race2"], plan_code="1m")
-    race_order = await db.create_order(5001, "1m", 150, 150, None, "stars", "subscription")
+    race_order = await db.create_order(5001, "1m", 150, 150, None, "yookassa", "subscription")
     results = await asyncio.gather(*(complete_order(bot, cfg, db, race_order) for _ in range(5)))
     order_5001 = await db.get_order(race_order)
     subs_5001 = await db.fetchall("SELECT * FROM subscriptions WHERE user_id = 5001")

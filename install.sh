@@ -13,7 +13,7 @@
 #      sudo bash install.sh --help
 #
 #  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
-#  VPN_PANEL, XUI_*, YOOKASSA_*, YOOMONEY_*, WEBHOOK_*. Полный список —
+#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*. Полный список —
 #  в .env.example. Пример:
 #      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 APP=... bash install.sh --yes
 # ============================================================================
@@ -166,7 +166,7 @@ collect_config() {
   ask_required ADMIN_IDS "Ваш Telegram ID (из @userinfobot), можно несколько через запятую"
   ask BOT_NAME "Название сервиса" "OPVPN"
   ask SUPPORT_USERNAME "Поддержка, без @" "support"
-  ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa,yoomoney,stars,manual"
+  ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa"
 
   printf '\n%s\n' "${c_blu}=== Выдача ключей ===${c_reset}"
   ask_choice VPN_PANEL "Режим выдачи ключей" "pool" pool xui
@@ -200,16 +200,6 @@ collect_config() {
           ask_required WEBHOOK_PUBLIC_URL "Публичный URL вебхука, например https://bot.example.com/yookassa/webhook"
           ask_choice WEBHOOK_TRUST_PROXY "Перед ботом стоит reverse-proxy (nginx/caddy)" "false" false true
         fi
-      fi
-      ;;
-  esac
-
-  case ",${PAYMENT_METHODS}," in
-    *,yoomoney,*)
-      printf '\n%s\n' "${c_blu}=== ЮMoney ===${c_reset}"
-      ask YOOMONEY_WALLET "Номер кошелька ЮMoney (Enter — пропустить)" ""
-      if [ -n "${YOOMONEY_WALLET:-}" ]; then
-        ask_required YOOMONEY_TOKEN "OAuth-токен ЮMoney (право operation-history)"
       fi
       ;;
   esac
@@ -247,8 +237,6 @@ write_env() {
 
   put_env "$env_file" YOOKASSA_SHOP_ID "${YOOKASSA_SHOP_ID:-}"
   put_env "$env_file" YOOKASSA_SECRET_KEY "${YOOKASSA_SECRET_KEY:-}"
-  put_env "$env_file" YOOMONEY_WALLET "${YOOMONEY_WALLET:-}"
-  put_env "$env_file" YOOMONEY_TOKEN "${YOOMONEY_TOKEN:-}"
   if [ "${WEBHOOK_ENABLED:-false}" = "true" ]; then
     set_env "$env_file" WEBHOOK_ENABLED true
     put_env "$env_file" WEBHOOK_PUBLIC_URL "${WEBHOOK_PUBLIC_URL:-}"

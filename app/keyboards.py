@@ -63,17 +63,11 @@ def plans_kb(plans: Sequence, currency: str = "₽", prefix: str = "buy") -> Inl
     return builder.as_markup()
 
 
-def payment_methods_kb(available: Iterable[str], order_id: int, currency: str = "₽") -> InlineKeyboardMarkup:
+def payment_methods_kb(available: Iterable[str], order_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for method in available:
         if method == "yookassa":
             builder.button(text="💳 Карта / СБП", callback_data=f"pay:yookassa:{order_id}")
-        elif method == "yoomoney":
-            builder.button(text="💜 ЮMoney", callback_data=f"pay:yoomoney:{order_id}")
-        elif method == "stars":
-            builder.button(text="⭐️ Telegram Stars", callback_data=f"pay:stars:{order_id}")
-        elif method == "manual":
-            builder.button(text="🧾 Оплачу вручную", callback_data=f"pay:manual:{order_id}")
     builder.button(text="🎟 Промокод", callback_data=f"promo:order:{order_id}")
     builder.button(text="❌ Отменить заказ", callback_data=f"order:cancel:{order_id}")
     builder.adjust(1)
@@ -84,15 +78,6 @@ def profile_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📜 История заказов", callback_data="orders:history")
     builder.button(text="◀️ В меню", callback_data="menu:main")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def yoomoney_kb(form_url: str, order_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💜 Перейти к оплате", url=form_url)
-    builder.button(text="🔄 Проверить оплату", callback_data=f"pay:check:{order_id}")
-    builder.button(text="❌ Отменить заказ", callback_data=f"order:cancel:{order_id}")
     builder.adjust(1)
     return builder.as_markup()
 

@@ -127,10 +127,6 @@ class Config:
     yookassa_secret_key: str
     yookassa_return_url: str
     yookassa_test: bool
-    yoomoney_wallet: str
-    yoomoney_token: str
-    stars_rate: float
-    manual_payment_note: str
     payments_proxy: str
 
     # --- Панель выдачи ключей ---
@@ -176,24 +172,6 @@ class Config:
     def yookassa_enabled(self) -> bool:
         return "yookassa" in self.payment_methods and bool(self.yookassa_shop_id and self.yookassa_secret_key)
 
-    @property
-    def yoomoney_enabled(self) -> bool:
-        return "yoomoney" in self.payment_methods and bool(self.yoomoney_wallet and self.yoomoney_token)
-
-    @property
-    def stars_enabled(self) -> bool:
-        return "stars" in self.payment_methods
-
-    @property
-    def manual_enabled(self) -> bool:
-        return "manual" in self.payment_methods
-
-    def stars_price(self, amount_rub: int) -> int:
-        """Перевод цены в рублях в количество Telegram Stars."""
-        if self.stars_rate <= 0:
-            return amount_rub
-        return max(1, round(amount_rub / self.stars_rate))
-
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
 
@@ -212,15 +190,11 @@ def load_config() -> Config:
         trial_devices=_int("TRIAL_DEVICES", 1),
         trial_traffic_gb=_int("TRIAL_TRAFFIC_GB", 10),
         trial_panel_hint=_str("TRIAL_PANEL_HINT", "trial"),
-        payment_methods=_list("PAYMENT_METHODS", ("yookassa", "yoomoney", "stars", "manual")),
+        payment_methods=_list("PAYMENT_METHODS", ("yookassa",)),
         yookassa_shop_id=_str("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=_str("YOOKASSA_SECRET_KEY"),
         yookassa_return_url=_str("YOOKASSA_RETURN_URL", "https://t.me"),
         yookassa_test=_bool("YOOKASSA_TEST", False),
-        yoomoney_wallet=_str("YOOMONEY_WALLET"),
-        yoomoney_token=_str("YOOMONEY_TOKEN"),
-        stars_rate=_float("STARS_RATE", 1.5),
-        manual_payment_note=_str("MANUAL_PAYMENT_NOTE", "Реквизиты уточняйте у поддержки."),
         payments_proxy=_str("PAYMENTS_PROXY"),
         panel=_str("VPN_PANEL", "pool").lower(),
         xui_url=_str("XUI_URL").rstrip("/"),
@@ -276,10 +250,6 @@ def validate(cfg: Config) -> list[str]:
     if "yookassa" in cfg.payment_methods and not cfg.yookassa_enabled:
         problems.append(
             "Способ оплаты yookassa включён, но YOOKASSA_SHOP_ID/YOOKASSA_SECRET_KEY не заданы."
-        )
-    if "yoomoney" in cfg.payment_methods and not cfg.yoomoney_enabled:
-        problems.append(
-            "Способ оплаты yoomoney включён, но YOOMONEY_WALLET/YOOMONEY_TOKEN не заданы."
         )
     if not cfg.payment_methods:
         problems.append("PAYMENT_METHODS пуст — не осталось ни одного способа оплаты.")

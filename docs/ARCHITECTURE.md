@@ -19,7 +19,7 @@ app/middlewares.py         — троттлинг, регистрация/бан
 app/handlers/user.py       — пользовательский Router (магазин, оплата, ключи, профиль, тикеты)
 app/handlers/admin.py      — админский Router (фильтр IsAdmin на уровне роутера)
 app/services/panels.py     — выдача ключей: BasePanel → PoolPanel / XuiPanel
-app/services/payments.py   — YooKassaClient, YooMoneyClient, звёзды (send_invoice/refund)
+app/services/payments.py   — YooKassaClient (REST v3: создание платежа, проверка статуса)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
@@ -36,8 +36,8 @@ requirements-dev.txt       — инструменты разработки (ruff
 1. `load_config()` читает `.env` (python-dotenv с ручным fallback), возвращает frozen `Config`. `validate(cfg)` печатает список проблем и `SystemExit(2)`.
 2. `Database.connect()` создаёт схему (`SCHEMA`), сидирует `DEFAULT_PLANS`. Одна долгоживущая коннекция + `asyncio.Lock`; хелперы `execute/fetchone/fetchall/scalar`.
 3. `runtime.load(db, cfg)` накладывается поверх `.env`: значения из таблицы `settings` (правки админки) приоритетнее.
-4. `build_dispatcher()` кладёт `cfg/db/yk/ym/bot_username` в `dp` (workflow data) и подключает outer-middleware `ErrorsMiddleware`, затем `Throttling → User → RequiredChannel` на messages и callbacks. Роутеры: сначала `admin`, затем `user` (последний содержит перехватчик `adm:*` → «недостаточно прав»).
-5. Фоновый `background_worker` (цикл 180 с): `process_expired → send_reminders → poll_yookassa_orders → poll_yoomoney_orders → cancel_stale_orders`.
+4. `build_dispatcher()` кладёт `cfg/db/yk/bot_username` в `dp` (workflow data) и подключает outer-middleware `ErrorsMiddleware`, затем `Throttling → User → RequiredChannel` на messages и callbacks. Роутеры: сначала `admin`, затем `user` (последний содержит перехватчик `adm:*` → «недостаточно прав»).
+5. Фоновый `background_worker` (цикл 180 с): `process_expired → send_reminders → poll_yookassa_orders → cancel_stale_orders`.
 6. Остановка: SIGINT/SIGTERM → `stop_event` → `dp.stop_polling()`, в `finally` закрываются webhook-runner, платёжные клиенты, панель, БД, сессия бота.
 
 ## 3. Модель БД (SQLite)
@@ -88,9 +88,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 ## 5. Платежи
 
 * **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
-* **ЮMoney** (`YooMoneyClient`): форма quickpay с `label=opvpnbot-order-{id}`; автоподтверждение поиском входящей операции в operation-history по label и сумме. Домен не нужен.
-* **Telegram Stars**: `send_invoice(currency="XTR", provider_token="")`, payload `order:{id}`; обработка `pre_checkout_query` / `successful_payment`; возврат — `refund_star_payment`.
-* **Manual**: заказ создаётся, админ подтверждает через `adm:order:approve` → `complete_order(payment_id="manual:{admin_id}")`.
+* **Ручное подтверждение админом**: ожидающий заказ можно провести через `adm:order:approve` → `complete_order(payment_id="admin:{admin_id}")`.
 
 Единая точка завершения — `complete_order()`: помечает paid → выдаёт подписку (`grant_subscription`) → уведомления админам. Идемпотентна по статусу заказа.
 
@@ -104,9 +102,8 @@ requirements-dev.txt       — инструменты разработки (ruff
 1. **Дублирование** `sub:view/copy/qr/howto` в `msg_my_keys` и `show_subscription` — требует унификации callback'ов (`sub:*` принимает и id подписки, и order_id временного ключа).
 2. ~~**Нет транзакций** в критичных местах~~ — **исправлено**: `complete_order` использует атомарный `db.claim_order_for_payment` (pending → paid под `_lock`, двойная выдача невозможна); `take_key` — один `UPDATE ... RETURNING`; `apply_promo` выполняется под одним захватом `_lock` с единым коммитом. Покрыто проверками 64–71 в `tools/selftest.py` (раздел «Конкурентность и идемпотентность выдачи»).
 3. ~~`poll_yookassa_orders` каждый цикл создаёт новый `YooKassaClient`~~ — **исправлено**: фоновый воркер получает переиспользуемый клиент из `bot.py` (`background_worker(..., yk=yk)` → `poll_yookassa_orders(..., client=yk)`); локальный клиент создаётся только как fallback.
-4. В `user.py` остались заглушки «Оплата пока недоступна» для `buy:yoomoney:` / `buy:stars:` / `buy:manual:` — основной путь оплаты идёт через `pay:<method>:<order_id>`.
-5. Прямые SQL из хендлеров (например, `SELECT * FROM subscriptions WHERE id = ?`) в обход методов `Database`.
-6. `required_channels` проверяются через `get_chat_member` с кэшем 120 c; при ошибке API — «разрешить» (fail-open, осознанно).
+4. Прямые SQL из хендлеров (например, `SELECT * FROM subscriptions WHERE id = ?`) в обход методов `Database`.
+5. `required_channels` проверяются через `get_chat_member` с кэшем 120 c; при ошибке API — «разрешить» (fail-open, осознанно).
 
 ## 8. Как менять код безопасно
 

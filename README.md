@@ -4,7 +4,7 @@
 
 # OPVPN
 
-Полноценный Telegram-бот для продажи VPN-подписок на **aiogram 3**: витрина тарифов, оплата (карты РФ/СБП через ЮKassa, кошелёк ЮMoney, Telegram Stars), автоматическая выдача ключей из пула или из панели **3x-ui**, промокоды, поддержка, напоминания и админ-панель прямо в Telegram.
+Полноценный Telegram-бот для продажи VPN-подписок на **aiogram 3**: витрина тарифов, оплата через **ЮKassa** (карты РФ, СБП, SberPay), автоматическая выдача ключей из пула или из панели **3x-ui**, промокоды, поддержка, напоминания и админ-панель прямо в Telegram.
 
 
 
@@ -62,7 +62,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | Функция | Описание |
 |---|---|
 | 🛒 Витрина тарифов | Цены, сроки, лимиты трафика и устройств — редактируются из админки без перезапуска |
-| 💳 Оплата | Карта РФ / СБП (ЮKassa), **ЮMoney**, Telegram Stars, ручное подтверждение |
+| 💳 Оплата | Карта РФ / СБП / SberPay через **ЮKassa** |
 | 🎟 Промокоды | Процент или фиксированная сумма, лимит активаций и срок действия |
 | 🎁 Пробный период | Бесплатный доступ на N дней один раз на пользователя |
 | 🔑 Мои ключи | Карточка подписки, ссылка-конфиг, подписка, **QR-код**, инструкция под конкретное приложение |
@@ -88,7 +88,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 ### Технические фишки
 - long-polling (не нужен домен) — или вебхуки ЮKassa отдельным HTTP-сервером, если есть публичный адрес;
 - **проверка платежа по API** (телу вебхука не доверяем — сверяем сумму и статус);
-- резервный опрос ЮKassa и ЮMoney раз в 3 минуты, если вебхуки выключены;
+- резервный опрос ЮKassa раз в 3 минуты, если вебхуки выключены;
 - фоновая обработка: истечение подписок (с отключением клиента в панели), напоминания, автоотмена «висящих» заказов;
 - анти-спам троттлинг и обязательная подписка на каналы (проверка `getChatMember`);
 - лог платежей, логи с ротацией;
@@ -112,11 +112,8 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | Способ | Что нужно | Подробно |
 |---|---|---|
 | `yookassa` | `YOOKASSA_SHOP_ID` + `YOOKASSA_SECRET_KEY`, при желании вебхук | [docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md) |
-| `yoomoney` | Кошелёк `YOOMONEY_WALLET` + токен `YOOMONEY_TOKEN` | там же |
-| `stars` | Ничего — работает сразу; `STARS_RATE` задаёт курс ₽→⭐️ | там же |
-| `manual` | Только текст `MANUAL_PAYMENT_NOTE`; админ подтверждает оплату кнопкой | — |
 
-Список активных способов — переменная `PAYMENT_METHODS=yookassa,yoomoney,stars,manual`.
+Список активных способов — переменная `PAYMENT_METHODS=yookassa`.
 
 ---
 
@@ -130,11 +127,10 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | `ADMIN_IDS` | Telegram ID админов через запятую ([@userinfobot](https://t.me/userinfobot)) |
 | `VPN_PANEL` | `pool` / `xui` |
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
-| `PAYMENT_METHODS` | `yookassa,yoomoney,stars,manual` |
+| `PAYMENT_METHODS` | `yookassa` |
 | `TRIAL_ENABLED`, `TRIAL_DAYS` | Пробный период |
 | `REQUIRED_CHANNELS` | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала) |
 | `YOOKASSA_*` | Доступы магазина ЮKassa (shopId + секретный ключ) |
-| `YOOMONEY_WALLET`, `YOOMONEY_TOKEN` | Кошелёк ЮMoney + токен с правом `operation-history` (см. `docs/SETUP-PAYMENTS.md`) |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL` | Приём уведомлений ЮKassa (нужен публичный HTTPS) |
 | `NOTIFY_DAYS_BEFORE` | За сколько дней напоминать: по умолчанию `3,1` |
 | `AUTO_DISABLE_EXPIRED` | Отключать клиента в панели при истечении подписки |
@@ -159,8 +155,8 @@ app/utils.py               форматирование, QR-коды, инстр
 app/handlers/user.py       магазин, оплата, ключи, профиль, поддержка
 app/handlers/admin.py      админ-панель
 app/services/panels.py     pool / 3x-ui
-app/services/payments.py   ЮKassa API, ЮMoney (форма + проверка по label), Telegram Stars
-app/services/subs.py       выдача, продление, истечение, напоминания, бонусы
+app/services/payments.py   ЮKassa API (REST v3)
+app/services/subs.py       выдача, продление, истечение, напоминания
 app/webhook.py             HTTP-сервер уведомлений ЮKassa
 tools/selftest.py          автотест логики без сети
 tools/integration_test.py  тест маршрутизации апдейтов через диспетчер

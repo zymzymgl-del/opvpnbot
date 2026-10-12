@@ -25,9 +25,7 @@ os.environ.update({
     "ADMIN_IDS": "777",
     "DB_PATH": str(Path(TMP) / "it.sqlite3"),
     "VPN_PANEL": "pool",
-    "PAYMENT_METHODS": "yoomoney,stars,manual",
-    "YOOMONEY_WALLET": "410011234567890",
-    "YOOMONEY_TOKEN": "test-token",
+    "PAYMENT_METHODS": "yookassa",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "3",
     "CLAIM_ENABLED": "true",
@@ -141,17 +139,17 @@ async def run() -> None:
 
     bot = Bot(cfg.bot_token)
     install_stubs(bot)
-    from app.services.payments import YooMoneyClient
 
-    ym = YooMoneyClient(cfg)
-    ym_hits = {"n": 0}
+    class FakeYooKassa:
+        """Заглушка ЮKassa: платёж создаётся, проверка всегда успешна."""
 
-    async def fake_find(order_id, amount):
-        ym_hits["n"] += 1
-        return "op-ym-test" if ym_hits["n"] > 1 else None
+        async def create_payment(self, *, amount_rub, description, metadata):
+            return {"id": "pay-test", "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
 
-    ym.find_payment = fake_find  # type: ignore[assignment]
-    dp = build_dispatcher(cfg, db, bot, None, ym)
+        async def is_paid(self, payment_id, expected_amount=None):
+            return True
+
+    dp = build_dispatcher(cfg, db, bot, FakeYooKassa())
     dp["bot_username"] = "opvpnbot_test_bot"
 
     print("\n1. Пользовательский поток")
@@ -171,10 +169,8 @@ async def run() -> None:
            (await db.get_order(int(order_id)))["kind"] == "subscription")
 
     OUT.clear()
-    await dp.feed_update(bot, make_callback(555, f"pay:manual:{order_id}", 4))
-    expect("ручная оплата предложена", "Оплата заказа" in sent("message"), sent("message")[:80])
-    admins_notified = any("Ручная оплата" in text for _, text in OUT)
-    expect("админ уведомлён о ручной оплате", admins_notified)
+    await dp.feed_update(bot, make_callback(555, f"pay:yookassa:{order_id}", 4))
+    expect("оплата картой/СБП предложена", "Оплата заказа" in sent("message"), sent("message")[:80])
 
     # баланс вырезан: в профиле нет кнопки пополнения, оплата с баланса недоступна
     OUT.clear()
@@ -192,7 +188,7 @@ async def run() -> None:
     orders_count = int(await db.scalar("SELECT COUNT(*) FROM orders WHERE user_id = 555"))
     expect("повторный buy переиспользовал счёт (не плодит заказы)", orders_count == 1, str(orders_count))
 
-    # ручной заказ подтверждает админ — появляется подписка (нужна для дальнейших шагов)
+    # заказ подтверждает админ — появляется подписка (нужна для дальнейших шагов)
     OUT.clear()
     await dp.feed_update(bot, make_callback(777, f"adm:order:approve:{order_id}", 6))
     sub = await db.active_subscription(555)
@@ -227,15 +223,14 @@ async def run() -> None:
     promo_used = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
     expect("неоплаченный заказ не тратит промокод", promo_used == 0, str(promo_used))
 
-    print("\n2.5 Оплата через ЮMoney")
+    print("\n2.5 Оплата через ЮKassa")
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "buy:1m", 12))
-    ym_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
-    await dp.feed_update(bot, make_callback(555, f"pay:yoomoney:{ym_order}", 13))
-    expect("экран оплаты ЮMoney показан", "ЮMoney" in sent("message"), sent("message")[:140])
-    await dp.feed_update(bot, make_callback(555, f"pay:check:{ym_order}", 14))
-    await dp.feed_update(bot, make_callback(555, f"pay:check:{ym_order}", 15))
-    expect("оплата ЮMoney подтверждена и ключ выдан", "Оплата получена" in sent("message"), sent("message")[:140])
+    yk_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
+    await dp.feed_update(bot, make_callback(555, f"pay:yookassa:{yk_order}", 13))
+    expect("экран оплаты ЮKassa показан", "Оплата заказа" in sent("message"), sent("message")[:140])
+    await dp.feed_update(bot, make_callback(555, f"pay:check:{yk_order}", 14))
+    expect("оплата ЮKassa подтверждена и ключ выдан", "Оплата получена" in sent("message"), sent("message")[:140])
 
     print("\n3. Админ-панель")
     OUT.clear()
@@ -254,7 +249,7 @@ async def run() -> None:
     await dp.feed_update(bot, make_callback(777, "adm:orders", 13))
     expect("список заказов показан", "Заказы" in sent("message"), sent("message")[:80])
 
-    # подтверждение ручного заказа админом
+    # подтверждение заказа админом
     approve_order = int(await db.scalar(
         "SELECT id FROM orders WHERE status = 'pending' AND kind = 'subscription' ORDER BY id LIMIT 1"))
     OUT.clear()

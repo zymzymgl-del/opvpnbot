@@ -14,7 +14,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -39,11 +38,10 @@ from app.keyboards import (
     profile_kb,
     subscription_kb,
     support_kb,
-    yoomoney_kb,
 )
 from app.runtime import runtime as rt
 from app.services.panels import PanelError
-from app.services.payments import PaymentError, create_stars_invoice
+from app.services.payments import PaymentError
 from app.services.subs import complete_order, grant_subscription, notify_admins, renewal_available, renewal_window_days, safe_send
 from app.utils import (
     METHOD_RU,
@@ -78,9 +76,8 @@ FAQ_TEXT = (
 
 
 def _methods_line(cfg: Config) -> str:
-    """Человеческий список включённых способов оплаты (без служебных «none»/«manual»)."""
-    names = [METHOD_RU[m] for m in cfg.payment_methods
-             if m in {"yookassa", "yoomoney", "stars"}]
+    """Человеческий список включённых способов оплаты (без служебного «none»)."""
+    names = [METHOD_RU[m] for m in cfg.payment_methods if m in METHOD_RU]
     return ", ".join(names) if names else "по согласованию с поддержкой"
 
 
@@ -290,7 +287,7 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
         text += f"Было: {price(int(order['base_amount']), cfg.currency)}\n"
     text += f"\nК оплате: <b>{price(int(order['amount']), cfg.currency)}</b>"
     available = [m for m in cfg.payment_methods if m != "none"]
-    markup = payment_methods_kb(available, order_id, cfg.currency)
+    markup = payment_methods_kb(available, order_id)
     try:
         await target.message.edit_text(text, reply_markup=markup)
     except Exception:
@@ -414,7 +411,7 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
 # Оплата
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("pay:"))
-async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=None, ym=None) -> None:
+async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=None) -> None:
     parts = call.data.split(":")
     action, order_id = parts[1], int(parts[2])
     order = await db.get_order(order_id)
@@ -428,9 +425,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
 
     if action == "check":
         paid_id: str | None = None
-        if order["method"] == "yoomoney" and ym is not None:
-            paid_id = await ym.find_payment(order_id, amount)
-        elif order["payment_id"] and yk is not None and await yk.is_paid(order["payment_id"], amount):
+        if order["payment_id"] and yk is not None and await yk.is_paid(order["payment_id"], amount):
             paid_id = order["payment_id"]
         if paid_id:
             try:
@@ -442,25 +437,6 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         else:
             await call.answer("Платёж пока не подтверждён. Оплатите по ссылке или подождите пару минут.",
                               show_alert=True)
-        return
-
-    if action == "yoomoney":
-        if ym is None:
-            await call.answer("Оплата через ЮMoney временно недоступна, выберите другой способ.",
-                              show_alert=True)
-            return
-        await db.execute("UPDATE orders SET method = 'yoomoney' WHERE id = ?", (order_id,))
-        url = ym.form_url(amount, order_id)
-        await call.message.edit_text(
-            f"💜 <b>Оплата заказа #{order_id} через ЮMoney</b>\n\n"
-            f"Сумма: <b>{price(amount, cfg.currency)}</b>\n\n"
-            "1. Нажмите «Перейти к оплате» — откроется форма ЮMoney.\n"
-            "2. Оплатите картой или с кошелька — метка заказа подставится сама.\n"
-            "3. Вернитесь и нажмите «🔄 Проверить оплату» (или подождите пару минут — "
-            "бот проверяет автоматически).",
-            reply_markup=yoomoney_kb(url, order_id),
-        )
-        await call.answer("Ссылка готова")
         return
 
     if action == "yookassa":
@@ -493,73 +469,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         await call.answer("Счёт создан")
         return
 
-    if action == "stars":
-        stars = cfg.stars_price(amount)
-        await call.message.edit_text(
-            f"⭐️ <b>Оплата звёздами</b>\n\nСумма: <b>{stars} ⭐️</b> "
-            f"(≈ {price(amount, cfg.currency)})",
-        )
-        await create_stars_invoice(
-            bot, chat_id=call.from_user.id, order_id=order_id,
-            title=f"VPN {order['plan_code']}",
-            description=f"Подписка {order['plan_code']} — заказ #{order_id}",
-            stars_amount=stars,
-        )
-        await db.execute("UPDATE orders SET method = 'stars' WHERE id = ?", (order_id,))
-        await call.answer()
-        return
-
-    if action == "manual":
-        await db.execute("UPDATE orders SET method = 'manual' WHERE id = ?", (order_id,))
-        await call.message.edit_text(
-            f"🧾 <b>Оплата заказа #{order_id}</b>\n\n"
-            f"Сумма: <b>{price(amount, cfg.currency)}</b>\n\n"
-            f"{esc(cfg.manual_payment_note)}\n\n"
-            "После оплаты пришлите в поддержку чек или скриншот и номер заказа — "
-            "администратор подтвердит платёж, и ключ придёт автоматически.",
-            reply_markup=back_kb("menu:support", "🆘 Написать в поддержку"),
-        )
-        await call.answer("Заявка создана")
-        await notify_admins(
-            bot, cfg,
-            f"🧾 <b>Ручная оплата</b>\nЗаказ #{order_id}\n"
-            f"Пользователь: <code>{call.from_user.id}</code> (@{call.from_user.username or '—'})\n"
-            f"Сумма: {price(amount, cfg.currency)}",
-        )
-        return
-
     await call.answer()
-
-
-@router.pre_checkout_query()
-async def on_pre_checkout(query: PreCheckoutQuery, db: Database) -> None:
-    payload = query.invoice_payload or ""
-    order_id = int(payload.split(":", 1)[1]) if payload.startswith("order:") else 0
-    order = await db.get_order(order_id) if order_id else None
-    if order is None or order["status"] != "pending":
-        await query.answer(ok=False, error_message="Заказ не найден или уже оплачен.")
-        return
-    await query.answer(ok=True)
-
-
-@router.message(F.successful_payment)
-async def on_successful_payment(message: Message, db: Database, cfg: Config, bot: Bot) -> None:
-    payment = message.successful_payment
-    payload = payment.invoice_payload or ""
-    order_id = int(payload.split(":", 1)[1]) if payload.startswith("order:") else 0
-    if not order_id:
-        await message.answer("Оплата получена, но заказ не найден. Напишите в поддержку.")
-        return
-    await db.execute("UPDATE orders SET method = 'stars' WHERE id = ?", (order_id,))
-    try:
-        await complete_order(bot, cfg, db, order_id, payment_id=payment.telegram_payment_charge_id)
-    except PanelError as exc:
-        await message.answer(
-            "✅ Оплата получена, но выдача ключа задержалась — администратор уже уведомлён.",
-        )
-        await notify_admins(bot, cfg, f"🚨 Оплата звёздами, выдача не удалась: заказ #{order_id}, {esc(exc)}")
-        return
-    await message.answer(f"⭐️ Спасибо за оплату {payment.total_amount} ⭐️! Ключ отправлен выше.")
 
 
 # ---------------------------------------------------------------------------
