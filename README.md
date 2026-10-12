@@ -177,7 +177,7 @@ requirements-dev.txt       инструменты разработки (не о�
 requirements.lock.txt      lock-файл (точные версии всех зависимостей)
 .env.example               образец конфигурации → копируется в .env
 deploy/opvpnbot.service    образец systemd-юнита
-docs/                      инструкции по панелям и оплате
+docs/                      инструкции, архитектура, runbook оператора
 ```
 
 ## 🧯 Частые вопросы
