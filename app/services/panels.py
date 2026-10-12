@@ -69,6 +69,10 @@ class BasePanel(ABC):
     async def set_enabled(self, *, panel_username: str, enabled: bool) -> bool:
         return False
 
+    async def restart_xray(self) -> bool:
+        """Перезапустить ядро Xray в панели (по умолчанию не поддерживается)."""
+        return False
+
     async def delete_client(self, *, panel_username: str) -> bool:
         return False
 
@@ -467,6 +471,15 @@ class XuiPanel(BasePanel):
             method="POST",
             payload={"id": inbound["id"], "settings": json.dumps({"clients": [client]})},
         )
+        return True
+
+    async def restart_xray(self) -> bool:
+        """Перезапуск ядра Xray через API панели (``POST /panel/api/server/restartXrayService``).
+
+        ВНИМАНИЕ: это принудительный рестарт — активные соединения клиентов на
+        несколько секунд оборвутся и переподключатся сами.
+        """
+        await self._api("/server/restartXrayService", method="POST")
         return True
 
     async def delete_client(self, *, panel_username: str) -> bool:

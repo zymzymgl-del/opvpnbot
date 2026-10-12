@@ -144,6 +144,7 @@ def admin_kb(stats: dict, tickets_open: int = 0) -> InlineKeyboardMarkup:
         ("📊 Статистика", "adm:stats", 0),
         ("💾 Бэкап базы", "adm:backup", 0),
         ("🧪 Проверить панель", "adm:paneltest", 0),
+        ("🔧 Обслуживание", "adm:svc", 0),
     ]
     for text, data, badge in slots:
         if badge:
@@ -153,6 +154,25 @@ def admin_kb(stats: dict, tickets_open: int = 0) -> InlineKeyboardMarkup:
     builder.button(text="🏠 В меню", callback_data="menu:main")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def admin_service_kb() -> InlineKeyboardMarkup:
+    """Раздел «Обслуживание»: перезапуск бота и ядра Xray (с подтверждением)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Перезапустить бота", callback_data="adm:svc:ask:bot")
+    builder.button(text="♻️ Перезапустить Xray", callback_data="adm:svc:ask:xray")
+    builder.button(text="◀️ Назад", callback_data="adm:panel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def confirm_kb(yes_data: str, no_data: str = "adm:svc",
+               yes_label: str = "✅ Да, перезапустить", no_label: str = "✖️ Отмена") -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения опасного действия (двухшаговое подтверждение)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=yes_label, callback_data=yes_data)],
+        [InlineKeyboardButton(text=no_label, callback_data=no_data)],
+    ])
 
 
 def admin_order_kb(order_id: int) -> InlineKeyboardMarkup:

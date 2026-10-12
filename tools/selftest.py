@@ -39,7 +39,7 @@ os.environ.update({
 
 from app.config import load_config, validate  # noqa: E402
 from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
-from app.keyboards import main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
+from app.keyboards import admin_service_kb, main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
 from app.logctx import current_request_id, log_context  # noqa: E402
 from app.runtime import runtime as rt  # noqa: E402
 from app.services.panels import (  # noqa: E402
@@ -163,6 +163,12 @@ async def run() -> None:
         check("request_id установлен внутри контекста",
               rid == "test-rid" and current_request_id() == "test-rid")
     check("request_id сброшен после выхода из контекста", current_request_id() == "-")
+
+    print("\n1d. Обслуживание: клавиатура и панель")
+    labels = {b.text for row in admin_service_kb().inline_keyboard for b in row}
+    check("кнопки обслуживания: перезапуск бота и Xray",
+          {"🔄 Перезапустить бота", "♻️ Перезапустить Xray"} <= labels, str(labels))
+    check("XuiPanel умеет перезапускать Xray", callable(getattr(XuiPanel, "restart_xray", None)))
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.

@@ -168,6 +168,9 @@ async def run() -> None:
         async def set_enabled(self, *, panel_username, enabled):
             return True
 
+        async def restart_xray(self):
+            return True
+
         async def delete_client(self, *, panel_username):
             return True
 
@@ -325,6 +328,21 @@ async def run() -> None:
     expect("админ-колбэк недоступен обычному пользователю",
            "Статистика" not in sent("message"),
            sent("message")[:80])
+
+    print("\n3b. Обслуживание: перезапуск бота и Xray")
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, "adm:svc", 30))
+    expect("раздел обслуживания открыт", "Обслуживание" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, "adm:svc:ask:xray", 31))
+    expect("запрошено подтверждение Xray", "Перезапустить Xray" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, "adm:svc:do:xray", 32))
+    expect("Xray перезапущен", "Xray перезапущен" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, "adm:svc:ask:bot", 33))
+    expect("запрошено подтверждение перезапуска бота",
+           "Перезапустить бота" in sent("message"), sent("message")[:80])
 
     print("\n4. Прочее")
     OUT.clear()

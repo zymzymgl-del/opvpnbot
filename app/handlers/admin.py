@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import signal
 from datetime import timedelta
 
 from aiogram import Bot, F, Router
@@ -24,11 +27,13 @@ from app.db import Database, to_iso, utcnow
 from app.keyboards import (
     admin_kb,
     admin_order_kb,
+    admin_service_kb,
     admin_ticket_kb,
     admin_user_kb,
     back_kb,
     broadcast_audience_kb,
     cancel_kb,
+    confirm_kb,
     main_menu,
     plan_edit_kb,
     plans_admin_kb,
@@ -37,7 +42,7 @@ from app.keyboards import (
 from app.runtime import runtime as rt
 from app.services.claims import build_claim_link, find_claimable
 from app.services.panels import PanelError, get_panel
-from app.services.subs import complete_order, grant_subscription, safe_send
+from app.services.subs import complete_order, grant_subscription, notify_admins, safe_send
 from app.utils import STATUS_RU, chunks, esc, fmt_dt, human_left, make_qr_png, price
 
 log = logging.getLogger(__name__)
@@ -149,6 +154,84 @@ async def cb_panel_test(call: CallbackQuery, db: Database, cfg: Config) -> None:
         reply_markup=back_kb("adm:panel", "◀️ Назад"),
     )
     await call.answer()
+
+
+# ---------------------------------------------------------------------------
+# Обслуживание: перезапуск бота и ядра Xray
+# ---------------------------------------------------------------------------
+def _exit_for_restart() -> None:
+    """Мягко завершает процесс, чтобы systemd (Restart=always) поднял бота заново.
+
+    Отправляем себе SIGTERM — в bot.py на него стоит обработчик graceful shutdown
+    (закроются БД/панель/сессии), затем сработает политика перезапуска службы.
+    """
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception as exc:  # noqa: BLE001 — платформа без сигналов
+        log.warning("Не удалось завершить процесс для перезапуска: %s", exc)
+
+
+@router.callback_query(F.data == "adm:svc")
+async def cb_service(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "🔧 <b>Обслуживание</b>\n\n"
+        "• <b>Перезапустить бота</b> — бот корректно завершится, служба поднимет его за пару секунд.\n"
+        "• <b>Перезапустить Xray</b> — ядро панели 3x-ui перезапустится через API "
+        "(активные соединения клиентов на пару секунд оборвутся).\n\n"
+        "<i>Оба действия выполняются сразу после подтверждения.</i>",
+        reply_markup=admin_service_kb(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:svc:ask:bot")
+async def cb_svc_ask_bot(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "🔄 <b>Перезапустить бота?</b>\n\n"
+        "Бот завершит работу и будет поднят службой через несколько секунд. "
+        "Незавершённые диалоги прервутся.",
+        reply_markup=confirm_kb("adm:svc:do:bot", yes_label="🔄 Да, перезапустить бота"),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:svc:ask:xray")
+async def cb_svc_ask_xray(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "♻️ <b>Перезапустить Xray?</b>\n\n"
+        "Ядро в панели перезапустится <b>принудительно</b> — активные VPN-соединения "
+        "клиентов на несколько секунд оборвутся и переподключатся сами.",
+        reply_markup=confirm_kb("adm:svc:do:xray", yes_label="♻️ Да, перезапустить Xray"),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:svc:do:xray")
+async def cb_svc_do_xray(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
+    panel = get_panel(cfg, db)
+    try:
+        await panel.restart_xray()
+    except PanelError as exc:
+        await call.answer(f"Не удалось перезапустить Xray: {exc}", show_alert=True)
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ошибка перезапуска Xray: %s", exc)
+        await call.answer("Ошибка перезапуска Xray, смотрите логи.", show_alert=True)
+        return
+    await call.message.edit_text("♻️ <b>Xray перезапущен.</b>",
+                                 reply_markup=back_kb("adm:svc", "◀️ К обслуживанию"))
+    await call.answer("Готово")
+    await notify_admins(bot, cfg, f"♻️ Xray перезапущен админом <code>{call.from_user.id}</code>.")
+
+
+@router.callback_query(F.data == "adm:svc:do:bot")
+async def cb_svc_do_bot(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "🔄 <b>Перезапускаю бота…</b>\n\nЧерез несколько секунд он снова будет на связи."
+    )
+    await call.answer("Перезапускаю…")
+    # Даём сообщению уйти и инициируем мягкую остановку: служба поднимет бота заново.
+    asyncio.get_running_loop().call_later(2.0, _exit_for_restart)
 
 
 @router.callback_query(F.data == "adm:backup")
