@@ -30,6 +30,7 @@ from app.config import load_config, validate
 from app.db import Database
 from app.handlers import admin as admin_handlers
 from app.handlers import user as user_handlers
+from app.health import start_health_server
 from app.middlewares import (
     ErrorsMiddleware,
     RequiredChannelMiddleware,
@@ -131,6 +132,15 @@ async def main() -> None:
                       cfg.webhook_host, cfg.webhook_port, exc)
             log.error("Платежи будут подтверждаться опросом API (раз в 3 минуты).")
 
+    # --- healthcheck для внешнего мониторинга (uptime) ---------------------
+    health_runner = None
+    if cfg.health_enabled:
+        try:
+            health_runner = await start_health_server(cfg, db)
+        except OSError as exc:
+            log.error("Не удалось запустить healthcheck на %s:%s — %s",
+                      cfg.health_host, cfg.health_port, exc)
+
     # --- фоновая обработка (напоминания, истечение, проверка платежей) ---
     worker = asyncio.create_task(background_worker(bot, cfg, db, yk=yk), name="background-worker")
 
@@ -178,6 +188,8 @@ async def main() -> None:
         worker.cancel()
         if webhook_runner is not None:
             await webhook_runner.cleanup()
+        if health_runner is not None:
+            await health_runner.cleanup()
         if yk is not None:
             await yk.close()
         await close_panel()

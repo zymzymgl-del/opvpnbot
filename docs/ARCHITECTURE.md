@@ -22,6 +22,7 @@ app/services/panels.py     — выдача ключей: BasePanel → XuiPanel
 app/services/payments.py   — YooKassaClient (REST v3: создание платежа, проверка статуса)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
+app/health.py              — aiohttp-сервер GET /healthz для внешнего мониторинга (uptime)
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
 tools/integration_test.py  — маршрутизация апдейтов через Dispatcher.feed_update
 install.sh / deploy/       — установка на VPS: systemd-служба opvpnbot (install.sh --update/--uninstall/--no-service)
@@ -38,21 +39,21 @@ requirements-dev.txt       — инструменты разработки (ruff
 3. `runtime.load(db, cfg)` накладывается поверх `.env`: значения из таблицы `settings` (правки админки) приоритетнее.
 4. `build_dispatcher()` кладёт `cfg/db/yk/bot_username` в `dp` (workflow data) и подключает outer-middleware `ErrorsMiddleware`, затем `Throttling → User → RequiredChannel` на messages и callbacks. Роутеры: сначала `admin`, затем `user` (последний содержит перехватчик `adm:*` → «недостаточно прав»).
 5. Фоновый `background_worker` (цикл 180 с): `process_expired → send_reminders → poll_yookassa_orders → cancel_stale_orders`.
-6. Остановка: SIGINT/SIGTERM → `stop_event` → `dp.stop_polling()`, в `finally` закрываются webhook-runner, платёжные клиенты, панель, БД, сессия бота.
+6. Остановка: SIGINT/SIGTERM → `stop_event` → `dp.stop_polling()`, в `finally` закрываются health-runner, webhook-runner, платёжные клиенты, панель, БД, сессия бота.
 
 ## 3. Модель БД (SQLite)
 
-| Таблица | Назначение | Ключевые поля |
-|---|---|---|
-| `users` | клиенты | telegram_id PK, trial_used, is_banned |
-| `plans` | витрина | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order |
-| `orders` | заказы | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
-| `subscriptions` | выданные ключи | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d») |
-| `promos`, `promo_uses` | промокоды | discount_type percent/fixed, max_uses, expires_at |
-| `tickets`, `ticket_messages` | поддержка | status open/closed, from_admin |
-| `payments_log` | история денег | user_id, amount, method, kind, note |
-| `broadcasts` | журнал рассылок | audience, sent/failed |
-| `settings` | рантайм-настройки | key/value |
+| Таблица                      | Назначение        | Ключевые поля                                                                                                     |
+| ---------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `users`                      | клиенты           | telegram_id PK, trial_used, is_banned                                                                             |
+| `plans`                      | витрина           | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order                                   |
+| `orders`                     | заказы            | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
+| `subscriptions`              | выданные ключи    | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d»)                         |
+| `promos`, `promo_uses`       | промокоды         | discount_type percent/fixed, max_uses, expires_at                                                                 |
+| `tickets`, `ticket_messages` | поддержка         | status open/closed, from_admin                                                                                    |
+| `payments_log`               | история денег     | user_id, amount, method, kind, note                                                                               |
+| `broadcasts`                 | журнал рассылок   | audience, sent/failed                                                                                             |
+| `settings`                   | рантайм-настройки | key/value                                                                                                         |
 
 Время везде хранится как ISO-8601 UTC (`to_iso/from_iso`, микросекунды отбрасываются).
 
@@ -60,8 +61,8 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 `BasePanel` — контракт: `create_client / extend_client / set_enabled / delete_client / health / close`. Возвращает `IssuedKey(vpn_key, sub_url, panel, panel_username)`.
 
-* **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
-* Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
+- **XuiPanel (3x-ui)** — логин (`/login` cookie-сессия или Bearer-токен), `/panel/api/inbounds/addClient|updateClient|delClient`; ссылка vless/vmess/trojan собирается `_build_link()` из streamSettings (reality/tls/ws/grpc/httpupgrade/xhttp). Поддерживает несколько inbound'ов (`XUI_INBOUND_IDS`): один клиент с общим `email`/`subId` создаётся сразу во всех, а панель собирает их в одну подписку `/sub/{subId}` (актуальные сборки через `/panel/api/clients/*`).
+- Синглтон панели: `get_panel(cfg, db)` / `close_panel()` (сбрасывается при остановке).
 
 Кастомная панель: наследник `BasePanel` + регистрация в `get_panel()`.
 
@@ -82,18 +83,17 @@ requirements-dev.txt       — инструменты разработки (ruff
 `active` → `expired` (истечение в `process_expired`) → снова `active` при возобновлении;
 `disabled` — админский отзыв (`adm:user:wipe`, клиент удаляется в панели).
 
-
 ## 5. Платежи
 
-* **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
-* **Ручное подтверждение админом**: ожидающий заказ можно провести через `adm:order:approve` → `complete_order(payment_id="admin:{admin_id}")`.
+- **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
+- **Ручное подтверждение админом**: ожидающий заказ можно провести через `adm:order:approve` → `complete_order(payment_id="admin:{admin_id}")`.
 
 Единая точка завершения — `complete_order()`: помечает paid → выдаёт подписку (`grant_subscription`) → уведомления админам. Идемпотентна по статусу заказа.
 
 ## 6. Состояния FSM (aiogram StatesGroup)
 
-* Пользователь: `PromoStates.enter`, `TicketStates.subject/message/reply`.
-* Админ: `AdminStates.*` (добавление ключей, мастер промокода из 5 шагов, рассылка, поиск/сообщение/выдача пользователя, ответ в тикет, редактирование тарифа, триал).
+- Пользователь: `PromoStates.enter`, `TicketStates.subject/message/reply`.
+- Админ: `AdminStates.*` (добавление ключей, мастер промокода из 5 шагов, рассылка, поиск/сообщение/выдача пользователя, ответ в тикет, редактирование тарифа, триал).
 
 ## 7. Известные технические долги (зафиксированы при реконструкции)
 
@@ -105,7 +105,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 ## 8. Как менять код безопасно
 
-* Любая правка — после `python tools/selftest.py` (71 проверка) и `python tools/integration_test.py`.
-* Новые кнопки: колбэк ≤ 64 байт, префикс `домен:действие[:arg]`; новые префиксы добавлять в соответствующий Router раньше catch-all.
-* Новые поля БД: миграция через `ALTER TABLE ... ADD COLUMN` внутри `Database.connect()` (idempotent), плюс белый список в `set_user_field/update_subscription`.
-* Деньги: любые изменения списаний/начислений — только через `Database` +Ideмпотентность `complete_order` сохранять обязательно.
+- Любая правка — после `python tools/selftest.py` (71 проверка) и `python tools/integration_test.py`.
+- Новые кнопки: колбэк ≤ 64 байт, префикс `домен:действие[:arg]`; новые префиксы добавлять в соответствующий Router раньше catch-all.
+- Новые поля БД: миграция через `ALTER TABLE ... ADD COLUMN` внутри `Database.connect()` (idempotent), плюс белый список в `set_user_field/update_subscription`.
+- Деньги: любые изменения списаний/начислений — только через `Database` +Ideмпотентность `complete_order` сохранять обязательно.

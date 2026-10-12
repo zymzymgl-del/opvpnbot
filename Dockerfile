@@ -31,8 +31,9 @@ USER app
 # База, логи и бэкапы живут здесь (том монтируется в этот каталог).
 VOLUME ["/app/data"]
 
-# Порт HTTP-сервера вебхуков ЮKassa (используется при WEBHOOK_ENABLED=true).
-EXPOSE 8080
+# 8080 — HTTP-сервер вебхуков ЮKassa (при WEBHOOK_ENABLED=true);
+# 8081 — healthcheck GET /healthz для внешнего мониторинга (при HEALTH_ENABLED=true).
+EXPOSE 8080 8081
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-u", "bot.py"]

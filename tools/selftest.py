@@ -205,6 +205,14 @@ async def run() -> None:
     down_2 = await grant_subscription(bot, cfg, db, 1002, "1m")
     check("тариф на 2 устройства понизил лимит (3→2)", int(down_2["devices"]) == 2, str(down_2["devices"]))
 
+    print("\n3b. Триал: атомарный захват (защита от двойной выдачи)")
+    await db.ensure_user(1003, "carol", "Кэрол")
+    check("первый захват триала успешен", await db.claim_trial(1003) is True)
+    check("повторный захват триала отклонён", await db.claim_trial(1003) is False)
+    check("флаг trial_used выставлен", int((await db.get_user(1003))["trial_used"]) == 1)
+    await db.set_user_field(1003, "trial_used", 0)
+    check("после возврата права триал снова доступен", await db.claim_trial(1003) is True)
+
     print("\n3.5 Окно продления (за notify_days_before до конца)")
     fresh = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(sub["id"]),))
     check("продление вне окна (30 дн.) недоступно", renewal_available(fresh, cfg) is False)

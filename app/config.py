@@ -153,6 +153,11 @@ class Config:
     webhook_public_url: str
     webhook_trust_proxy: bool
 
+    # --- Healthcheck (внешний мониторинг) ---
+    health_enabled: bool
+    health_host: str
+    health_port: int
+
     # --- Прочее ---
     db_path: str
     log_level: str
@@ -214,6 +219,9 @@ def load_config() -> Config:
         webhook_path=_str("WEBHOOK_PATH", "/yookassa/webhook"),
         webhook_public_url=_str("WEBHOOK_PUBLIC_URL"),
         webhook_trust_proxy=_bool("WEBHOOK_TRUST_PROXY", False),
+        health_enabled=_bool("HEALTH_ENABLED", True),
+        health_host=_str("HEALTH_HOST", "127.0.0.1"),
+        health_port=_int("HEALTH_PORT", 8081),
         db_path=_str("DB_PATH", str(BASE_DIR / "data" / "opvpnbot.sqlite3")),
         log_level=_str("LOG_LEVEL", "INFO").upper(),
         log_file=_str("LOG_FILE", str(BASE_DIR / "data" / "bot.log")),
@@ -257,6 +265,13 @@ def validate(cfg: Config) -> list[str]:
         problems.append(
             "WEBHOOK_ENABLED=true, но WEBHOOK_PUBLIC_URL не задан — укажите публичный адрес "
             "вида https://bot.example.com/yookassa/webhook и пропишите его в кабинете ЮKassa."
+        )
+    if cfg.health_enabled and cfg.health_port <= 0:
+        problems.append("HEALTH_PORT должен быть больше нуля (либо выключите HEALTH_ENABLED).")
+    if cfg.health_enabled and cfg.webhook_enabled and cfg.health_port == cfg.webhook_port:
+        problems.append(
+            "HEALTH_PORT и WEBHOOK_PORT совпадают — healthcheck и вебхуки не смогут слушать "
+            "один порт. Разведите их (например, HEALTH_PORT=8081, WEBHOOK_PORT=8080)."
         )
     if cfg.payments_proxy and not cfg.payments_proxy.startswith(("http://", "https://")):
         problems.append(

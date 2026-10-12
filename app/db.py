@@ -307,6 +307,24 @@ class Database:
             raise ValueError(f"Недопустимое поле users.{field}")
         await self.execute(f"UPDATE users SET {field} = ? WHERE telegram_id = ?", (value, telegram_id))
 
+    async def claim_trial(self, telegram_id: int) -> bool:
+        """Атомарно «занимает» пробный период (trial_used 0 → 1).
+
+        Возвращает True только одному вызову. Защищает от двойной выдачи
+        триала при быстрых повторных нажатиях (check-then-act гонка): раньше
+        handler сначала читал trial_used, выдавал подписку и лишь потом
+        проставлял флаг. Вернуть право на триал при неудаче выдачи —
+        ``set_user_field(..., "trial_used", 0)``.
+        """
+        async with self._lock:
+            cur = await self.conn.execute(
+                "UPDATE users SET trial_used = 1 WHERE telegram_id = ? AND trial_used = 0",
+                (telegram_id,),
+            )
+            claimed = cur.rowcount > 0
+            await self.conn.commit()
+            return claimed
+
     async def all_user_ids(self, audience: str = "all") -> list[int]:
         if audience == "subscribers":
             sql = (

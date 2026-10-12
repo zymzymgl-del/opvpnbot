@@ -42,7 +42,13 @@ from app.keyboards import (
 from app.runtime import runtime as rt
 from app.services.panels import PanelError
 from app.services.payments import PaymentError
-from app.services.subs import complete_order, grant_subscription, notify_admins, renewal_available, renewal_window_days, safe_send
+from app.services.subs import (
+    complete_order,
+    grant_subscription,
+    notify_admins,
+    renewal_available,
+    renewal_window_days,
+)
 from app.utils import (
     METHOD_RU,
     STATUS_RU,
@@ -648,26 +654,31 @@ async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> 
     if not rt.trial_enabled:
         await call.answer("Пробный период сейчас недоступен.", show_alert=True)
         return
-    user = await db.get_user(call.from_user.id)
-    if user is not None and user["trial_used"]:
-        await _edit_or_answer(call, "🎁 Пробный период уже был использован — доступен только платный тариф.",
-                              back_kb("menu:buy", "🛒 Купить VPN"))
-        await call.answer()
-        return
     active = await db.active_subscription(call.from_user.id)
     if active is not None:
         await _edit_or_answer(call, "У вас уже есть активная подписка 🙂", back_kb("menu:main"))
         await call.answer()
         return
+    # Атомарно «занимаем» триал (trial_used 0 → 1) ДО выдачи: два быстрых
+    # нажатия подряд не создадут две пробные подписки (защита от гонки).
+    if not await db.claim_trial(call.from_user.id):
+        await _edit_or_answer(call, "🎁 Пробный период уже был использован — доступен только платный тариф.",
+                              back_kb("menu:buy", "🛒 Купить VPN"))
+        await call.answer()
+        return
     try:
         await grant_subscription(bot, cfg, db, call.from_user.id, "trial")
     except PanelError as exc:
+        # Выдача не удалась — возвращаем право на триал, чтобы можно было повторить.
+        await db.set_user_field(call.from_user.id, "trial_used", 0)
         await _edit_or_answer(call, f"⚠️ Не удалось выдать пробный доступ: {esc(exc)}\nНапишите в поддержку.",
                               back_kb("menu:support", "🆘 Поддержка"))
         await notify_admins(bot, cfg, f"⚠️ Пробный доступ не выдан <code>{call.from_user.id}</code>: {esc(exc)}")
         await call.answer()
         return
-    await db.set_user_field(call.from_user.id, "trial_used", 1)
+    except Exception:
+        await db.set_user_field(call.from_user.id, "trial_used", 0)
+        raise
     await notify_admins(bot, cfg, f"🎁 Пробный период выдан <code>{call.from_user.id}</code>")
     await call.answer("Пробный период выдан 🎁")
 
