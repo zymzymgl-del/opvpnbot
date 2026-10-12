@@ -648,8 +648,7 @@ async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
         f"Действует до: <b>{fmt_dt(sub['expires_at'])}</b> (осталось {human_left(sub['expires_at'])})\n"
         f"Устройств: {sub['devices']}, трафик: "
         f"{'безлимит' if not sub['traffic_gb'] else str(sub['traffic_gb']) + ' ГБ'}\n"
-        f"Панель: {sub['panel']}\n\n"
-        f"🔗 <code>{esc(link)}</code>"
+        
     )
     markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "", cfg.support_username)
     try:
