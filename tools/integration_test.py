@@ -253,7 +253,24 @@ async def run() -> None:
     expect("скидка 25% применена", int(order["amount"]) == 405 - 101, str(order["amount"]))
     expect("сообщение об успехе промокода", "применён" in sent("message"), sent("message")[:120])
     promo_used = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
-    expect("неоплаченный заказ не тратит промокод", promo_used == 0, str(promo_used))
+    expect("применение промокода резервирует его", promo_used == 1, str(promo_used))
+
+    # отмена заказа освобождает резерв промокода
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(555, f"order:cancel:{promo_order}", 40))
+    expect("заказ отменён", "Заказ отменён" in sent("message"), sent("message")[:120])
+    promo_after_cancel = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
+    expect("отмена освобождает промокод", promo_after_cancel == 0, str(promo_after_cancel))
+
+    # оформляем заказ заново с промокодом — списание при оплате проверит раздел 3
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(555, "buy:3m", 41))
+    promo_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
+    await dp.feed_update(bot, make_callback(555, f"promo:order:{promo_order}", 42))
+    await dp.feed_update(bot, make_message(555, "sale25", 43))
+    promo_reserved = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
+    expect("повторное применение после отмены снова резервирует промокод",
+           promo_reserved == 1, str(promo_reserved))
 
     print("\n2.5 Оплата через ЮKassa")
     OUT.clear()
