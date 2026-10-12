@@ -846,19 +846,6 @@ async def msg_ticket_message(message: Message, state: FSMContext, db: Database, 
     )
 
 
-@router.callback_query(F.data.startswith("ticket:reply:"))
-async def cb_ticket_reply(call: CallbackQuery, state: FSMContext, db: Database) -> None:
-    ticket_id = int(call.data.rsplit(":", 1)[1])
-    ticket = await db.get_ticket(ticket_id)
-    if ticket is None or int(ticket["user_id"]) != call.from_user.id:
-        await call.answer("Обращение не найдено.", show_alert=True)
-        return
-    await state.update_data(ticket_id=ticket_id)
-    await state.set_state(TicketStates.reply)
-    await _prompt_window(call, state, "✍️ Напишите сообщение в поддержку:")
-    await call.answer()
-
-
 @router.message(TicketStates.reply)
 async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot) -> None:
     data = await state.get_data()
@@ -870,18 +857,6 @@ async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, cf
     await _apply_window(bot, message.chat.id, window_id, "✅ Отправлено. Ответ придёт в этот чат.",
                         main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
     await notify_admins(bot, cfg, f"💬 <b>Обращение #{ticket_id}</b>: сообщение от <code>{message.from_user.id}</code>\n{esc(text)}")
-
-
-@router.callback_query(F.data.startswith("ticket:close:"))
-async def cb_ticket_close(call: CallbackQuery, db: Database) -> None:
-    ticket_id = int(call.data.rsplit(":", 1)[1])
-    ticket = await db.get_ticket(ticket_id)
-    if ticket is None or int(ticket["user_id"]) != call.from_user.id:
-        await call.answer("Обращение не найдено.", show_alert=True)
-        return
-    await db.close_ticket(ticket_id)
-    await call.message.edit_text(f"✅ Обращение #{ticket_id} закрыто. Спасибо!")
-    await call.answer()
 
 
 # ---------------------------------------------------------------------------
