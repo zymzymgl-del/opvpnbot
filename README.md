@@ -113,6 +113,79 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 
 ---
 
+## 🌐 nginx: вебхук ЮKassa и мониторинг
+
+Нужен, если хотите **мгновенные** уведомления ЮKassa (вместо опроса раз в 3 минуты)
+и/или внешний монитор `/healthz`. Без домена бот отлично работает и без nginx — см.
+[docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md).
+
+### 1. Установка nginx и HTTPS-сертификата
+
+```bash
+sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
+sudo certbot --nginx -d bot.example.com     # выпустит Let's Encrypt и настроит HTTPS
+```
+
+### 2. Конфиг (вебхук + healthcheck в одном server-блоке)
+
+`/etc/nginx/sites-available/opvpnbot`:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name bot.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+
+    # ЮKassa → бот: мгновенная выдача доступа после оплаты
+    location /yookassa/webhook {
+        proxy_pass http://127.0.0.1:8080/yookassa/webhook;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # ОБЯЗАТЕЛЬНО при WEBHOOK_TRUST_PROXY=true: иначе бот не увидит IP ЮKassa → 403
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    # Healthcheck для внешнего uptime-монитора
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8081/healthz;
+        proxy_set_header Host $host;
+        # при желании ограничьте доступ, например только IP монитора:
+        # allow 203.0.113.10; deny all;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/opvpnbot /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 3. Проверка
+
+```bash
+curl -s https://bot.example.com/healthz        # → {"ok": true}
+sudo tail -f /var/log/nginx/error.log
+```
+
+### 4. Что заполнить в `.env`
+
+```env
+WEBHOOK_ENABLED=true
+WEBHOOK_PUBLIC_URL=https://bot.example.com/yookassa/webhook
+WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, иначе вебхуки получат 403
+```
+
+Тот же адрес укажите в кабинете ЮKassa (**Интеграция → HTTP-уведомления**, событие
+`payment.succeeded`), а `https://bot.example.com/healthz` — во внешнем мониторе
+(healthchecks.io / UptimeRobot / Better Stack). После правок: `sudo systemctl restart opvpnbot`.
+
+---
+
 ## ⚙️ Основные настройки `.env`
 
 Полный список с комментариями — в [.env.example](.env.example). Самое важное:
