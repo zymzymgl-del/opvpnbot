@@ -98,6 +98,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 Телу вебхука не доверяем: получив `payment.succeeded`, бот **переспрашивает платёж**
 через `GET /v3/payments/{id}` и проверяет, что:
+
 - статус `succeeded` и `paid=true`;
 - сумма совпадает с суммой заказа (±1 копейка).
 
