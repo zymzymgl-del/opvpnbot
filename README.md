@@ -30,7 +30,7 @@ systemctl restart opvpnbot
 ## 🐳 Установка через Docker
 
 ```bash
-git clone -b fix-readme-for-opvpnbot-f2f4f https://github.com/zymzymgl-del/opvpnbot.git && cd opvpnbot
+git clone -b https://github.com/zymzymgl-del/opvpnbot.git && cd opvpnbot
 cp .env.example .env && nano .env      # заполните BOT_TOKEN, ADMIN_IDS и остальное
 docker compose up -d --build
 docker compose logs -f
@@ -39,7 +39,7 @@ docker compose logs -f
 ## 🛠 Ручная установка
 
 ```bash
-git clone -b fix-readme-for-opvpnbot-f2f4f https://github.com/zymzymgl-del/opvpnbot.git && cd opvpnbot
+git clone -b https://github.com/zymzymgl-del/opvpnbot.git && cd opvpnbot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env && nano .env       # токен, админы, оплата, панель
 .venv/bin/python bot.py
