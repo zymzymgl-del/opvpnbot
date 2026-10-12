@@ -122,11 +122,11 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | `BOT_TOKEN`                                        | Токен от [@BotFather](https://t.me/BotFather)                                                |
 | `ADMIN_IDS`                                        | Telegram ID админов через запятую ([@userinfobot](https://t.me/userinfobot))                 |
 | `VPN_PANEL`                                        | `xui`                                                                                        |
-| `XUI_VERIFY_SSL`, `XUI_CA_FILE`                    | Проверка TLS-сертификата панели (по умолчанию `true`); свой CA для self-signed |
+| `XUI_VERIFY_SSL`, `XUI_CA_FILE`                    | Проверка TLS-сертификата панели (по умолчанию `true`); свой CA для self-signed               |
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
 | `PAYMENT_METHODS`                                  | `yookassa`                                                                                   |
 | `TRIAL_ENABLED`, `TRIAL_DAYS`                      | Пробный период                                                                               |
-| `MAX_PENDING_ORDERS`                               | Максимум неоплаченных заказов на пользователя (0 — без лимита)                              |
+| `MAX_PENDING_ORDERS`                               | Максимум неоплаченных заказов на пользователя (0 — без лимита)                               |
 | `REQUIRED_CHANNELS`                                | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала)                         |
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |
@@ -135,6 +135,36 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | `AUTO_DISABLE_EXPIRED`                             | Отключать клиента в панели при истечении подписки                                            |
 
 Тарифы и пробный период можно менять прямо в админке (значение из админки приоритетнее `.env` для пробного периода).
+
+## ✅ Чек-лист перед продакшеном
+
+Минимум, что нужно заполнить и проверить перед первым запуском для реальных пользователей.
+
+**Обязательно в `.env`**
+
+- [ ] `BOT_TOKEN` — токен от [@BotFather](https://t.me/BotFather)
+- [ ] `ADMIN_IDS` — ваш Telegram ID (админам идут заказы, ошибки и алерты)
+- [ ] `VPN_PANEL=xui` + `XUI_URL`, `XUI_API_TOKEN` (или логин/пароль), `XUI_INBOUND_IDS`
+- [ ] `XUI_VERIFY_SSL=true` (по умолчанию) и `XUI_CA_FILE`, если сертификат панели самоподписанный
+- [ ] `XUI_SUB_BASE` — если нужна одна ссылка-подписка на несколько inbound'ов
+- [ ] `PAYMENT_METHODS=yookassa` + `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` (боевой магазин; `YOOKASSA_TEST=false`)
+- [ ] `WEBHOOK_ENABLED=true` + `WEBHOOK_PUBLIC_URL`, и тот же адрес прописан в кабинете ЮKassa
+
+**Проверить после запуска**
+
+- [ ] `curl -fsS http://127.0.0.1:8081/healthz` → `{"ok": true}`
+- [ ] адрес `/healthz` добавлен во внешний монитор (healthchecks.io / UptimeRobot) — алерт, если бот упал
+- [ ] в логе при старте: `Панель 'xui': OK` и `3x-ui TLS: проверка включена`
+- [ ] тестовая покупка от начала до конца: заказ → оплата → ключ пришёл (можно на тестовом магазине ЮKassa)
+- [ ] резервная копия: `/admin` → 💾 Бэкап базы
+
+**Не обязательно, но полезно**
+
+- [ ] `REQUIRED_CHANNELS` — обязательная подписка (бот должен быть админом этих каналов)
+- [ ] `CLAIM_ENABLED=true` + `CLAIM_SECRET` — привязка готовых клиентов панели к Telegram
+- [ ] `MAX_PENDING_ORDERS` — лимит неоплаченных заказов на пользователя
+
+Диагностика инцидентов — в [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## 🧭 Команды бота
 
@@ -151,7 +181,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняет `ruff check` + `tools/selftest.py` + `tools/integration_test.py`, а также `pip-audit` (известные уязвимости в зависимостях) и проверку `requirements.lock.txt`.
 
-## �🗂 Структура проекта
+## 🗂 Структура проекта
 
 ```
 bot.py                     точка входа: конфиг, диспетчер, polling, фоновые задачи
