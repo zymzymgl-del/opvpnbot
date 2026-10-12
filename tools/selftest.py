@@ -31,6 +31,9 @@ os.environ.update({
     "PAYMENT_METHODS": "stars,balance,manual",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "2",
+    # Реферальные бонусы идут только на баланс, поэтому для проверки нужны
+    # оба переключателя: REF_ENABLED + balance в PAYMENT_METHODS.
+    "REF_ENABLED": "true",
     "REF_PERCENT": "20",
     "LOG_FILE": str(Path(TMP) / "bot.log"),
 })
