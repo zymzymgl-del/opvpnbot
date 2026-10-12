@@ -94,7 +94,7 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
     if support_username:
         builder.button(text="🆘 Не работает", url=f"https://t.me/{support_username}")
-    builder.button(text="◀️ К подпискам", callback_data="menu:keys")
+    builder.button(text="📋 Все подписки", callback_data="menu:keys")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -128,14 +128,6 @@ def support_kb(has_open_ticket: bool, support_username: str = "") -> InlineKeybo
     builder.button(text="📖 FAQ", callback_data="support:faq")
     builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
-    return builder.as_markup()
-
-
-def ticket_kb(ticket_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✉️ Ответить", callback_data=f"ticket:reply:{ticket_id}")
-    builder.button(text="✅ Закрыть", callback_data=f"ticket:close:{ticket_id}")
-    builder.adjust(2, 1)
     return builder.as_markup()
 
 
@@ -200,7 +192,7 @@ def admin_user_kb(user_id: int, is_banned: bool) -> InlineKeyboardMarkup:
     builder.button(text="🔓 Разблокировать" if is_banned else "🚫 Заблокировать",
                    callback_data=f"adm:user:{'unban' if is_banned else 'ban'}:{user_id}")
     builder.button(text="🗑 Удалить устройства", callback_data=f"adm:user:wipe:{user_id}")
-    builder.button(text="◀️ Назад", callback_data="adm:users:page:0")
+    builder.button(text="◀️ К списку пользователей", callback_data="adm:users:page:0")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -234,7 +226,7 @@ def plan_edit_kb(code: str, is_active: int) -> InlineKeyboardMarkup:
     builder.button(text="👥 Устройств", callback_data=f"adm:plan:devices:{code}")
     builder.button(text="🔴 Скрыть" if is_active else "🟢 Показать",
                    callback_data=f"adm:plan:toggle:{code}")
-    builder.button(text="◀️ Назад", callback_data="adm:settings:plans")
+    builder.button(text="◀️ К тарифам", callback_data="adm:settings:plans")
     builder.adjust(1, 2, 2, 1, 1)
     return builder.as_markup()
 

@@ -535,7 +535,7 @@ async def cb_promo_card(call: CallbackQuery, db: Database) -> None:
         [InlineKeyboardButton(text="🔴 Выключить" if promo["is_active"] else "🟢 Включить",
                               callback_data=f"adm:promo:toggle:{promo['code']}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"adm:promo:del:{promo['code']}")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:promos")],
+        [InlineKeyboardButton(text="◀️ К промокодам", callback_data="adm:promos")],
     ]
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
     await call.answer()
@@ -887,7 +887,7 @@ async def msg_trial_days(message: Message, state: FSMContext, db: Database) -> N
     await rt.set_trial(db, int(raw))
     await message.answer(
         f"✅ Пробный период: {'выключен' if raw == '0' else raw + ' дн.'}",
-        reply_markup=back_kb("adm:settings", "◀️ Назад"),
+        reply_markup=back_kb("adm:settings", "◀️ В настройки"),
     )
 
 

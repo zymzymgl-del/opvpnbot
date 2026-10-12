@@ -216,7 +216,7 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
     )
     row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
     if notify:
-        # Только карточка подписки: QR — по кнопке, главное меню — по кнопке «◀️ К подпискам».
+        # Только карточка подписки: QR — по кнопке, главное меню — по кнопке «📋 Все подписки».
         await send_subscription_card(bot, cfg, db, user_id, row)
     if not quiet_admin:
         await notify_admins(

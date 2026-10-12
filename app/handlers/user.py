@@ -550,8 +550,8 @@ async def _load_own_sub(call: CallbackQuery, db: Database) -> dict | None:
 def _sub_back_kb(sub_id: int) -> InlineKeyboardMarkup:
     """Клавиатура возврата для подэкранов подписки (как у «Как подключиться»)."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="◀️ К подписке", callback_data=f"sub:view:{sub_id}")
-    builder.button(text="◀️ К подпискам", callback_data="menu:keys")
+    builder.button(text="◀️ Назад к подписке", callback_data=f"sub:view:{sub_id}")
+    builder.button(text="📋 Все подписки", callback_data="menu:keys")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -566,7 +566,7 @@ async def cb_sub_copy(call: CallbackQuery, db: Database) -> None:
         await call.answer("Ссылка ещё не готова.", show_alert=True)
         return
     # Логика как у «Как подключиться»: редактируем текущее сообщение (одно окно),
-    # добавляем возврат «◀️ К подписке». Ссылка — моноширинным блоком, копируется
+    # добавляем возврат «◀️ Назад к подписке». Ссылка — моноширинным блоком, копируется
     # тапом по ней (Telegram копирует <code>-текст нажатием).
     text = (
         f"🔗 <b>Ссылка подписки #{sub['id']}</b>\n\n"
@@ -607,7 +607,7 @@ async def cb_sub_howto(call: CallbackQuery, db: Database) -> None:
     if sub is None:
         return
     await _edit_or_answer(call, apps_instructions(sub["vpn_key"] or "", sub["sub_url"], int(sub["devices"])),
-                          back_kb(f"sub:view:{sub['id']}", "◀️ К подписке"))
+                          back_kb(f"sub:view:{sub['id']}", "◀️ Назад к подписке"))
     await call.answer()
 
 
@@ -617,7 +617,7 @@ async def cb_sub_renew(call: CallbackQuery, db: Database, cfg: Config) -> None:
     if sub is None:
         return
     # Логика как у «Как подключиться»: редактируем текущее сообщение и даём
-    # возврат «◀️ К подписке» (тарифы открываются поверх карточки подписки).
+    # возврат «◀️ Назад к подписке» (тарифы открываются поверх карточки подписки).
     user_id = call.from_user.id
     existing = await db.active_subscription(user_id)
     if existing is not None and not renewal_available(existing, cfg):
