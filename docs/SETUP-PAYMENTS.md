@@ -45,7 +45,15 @@ WEBHOOK_PUBLIC_URL=https://bot.example.com/yookassa/webhook
 WEBHOOK_TRUST_PROXY=true   # бот за nginx — обязательно, иначе все вебхуки получат 403
 ```
 
-2. Проксируйте адрес на локальный порт бота. Пример для nginx:
+2. Поставьте nginx и HTTPS-сертификат (если ещё не):
+
+```bash
+sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
+sudo certbot --nginx -d bot.example.com
+```
+
+3. Проксируйте вебхук (и `/healthz` для мониторинга) на локальные порты бота —
+   `/etc/nginx/sites-available/opvpnbot`:
 
 ```nginx
 server {
@@ -55,6 +63,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
 
+    # ЮKassa → бот: мгновенная выдача доступа после оплаты
     location /yookassa/webhook {
         proxy_pass http://127.0.0.1:8080/yookassa/webhook;
         proxy_http_version 1.1;
@@ -66,13 +75,24 @@ server {
         proxy_read_timeout 30s;
         proxy_send_timeout 30s;
     }
+
+    # Healthcheck для внешнего uptime-монитора
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8081/healthz;
+        proxy_set_header Host $host;
+    }
 }
 ```
 
-3. В кабинете ЮKassa: **Интеграция → HTTP-уведомления** → добавьте событие `payment.succeeded`
+```bash
+sudo ln -s /etc/nginx/sites-available/opvpnbot /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+4. В кабинете ЮKassa: **Интеграция → HTTP-уведомления** → добавьте событие `payment.succeeded`
    с адресом `https://bot.example.com/yookassa/webhook`.
-4. Перезапустите бота: `systemctl restart opvpnbot`. Проверить, что порт слушается:
-   `curl -s http://127.0.0.1:8080/healthz`.
+5. Перезапустите бота: `systemctl restart opvpnbot`. Проверьте healthcheck:
+   `curl -s https://bot.example.com/healthz` (и локально — `curl -s http://127.0.0.1:8081/healthz`).
 
 ### Как бот защищается от подделки уведомлений
 
