@@ -12,8 +12,11 @@
 #      sudo bash install.sh --dir /srv/opvpnbot --no-service
 #      sudo bash install.sh --help
 #
+#  Одна команда до прода (systemd + nginx + HTTPS + firewall):
+#      sudo bash install.sh --domain bot.example.com --email you@example.com --yes
+#
 #  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
-#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*. Полный список —
+#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*, DOMAIN, LEMC_EMAIL. Полный список —
 #  в .env.example. Пример:
 #      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 APP=... bash install.sh --yes
 # ============================================================================
@@ -30,6 +33,17 @@ INSTALL_DIR=""
 ASSUME_YES=0
 NO_SERVICE=0
 MODE="install"   # install | update | uninstall
+
+# Публичный адрес и инфраструктура.
+# Значения по умолчанию — через ${VAR:-…}, чтобы при --yes их можно было
+# передать переменными окружения, а не только флагами.
+DOMAIN="${DOMAIN:-}"                 # домен для вебхука/healthz; пусто — nginx не настраиваем
+LEMC_EMAIL="${LEMC_EMAIL:-}"         # e-mail для Let's Encrypt
+WITH_NGINX="${WITH_NGINX:-0}"        # 1 — настроить nginx + сертификат
+WITH_FIREWALL="${WITH_FIREWALL:-true}"   # "true"/"false" — ufw с уже открытыми SSH/80/443
+WEBHOOK_PATH="${WEBHOOK_PATH:-/yookassa/webhook}"
+WEBHOOK_PORT="${WEBHOOK_PORT:-8080}"
+HEALTH_PORT="${HEALTH_PORT:-8081}"
 
 c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_blu=$'\033[34m'
 info() { printf '%s\n' "${c_blu}[*]${c_reset} $*"; }
@@ -52,10 +66,16 @@ OPVPN — установщик
   --yes               без интерактивных вопросов; значения берутся из переменных окружения
   --no-service        не создавать systemd-службу (только venv + .env)
   --dir <путь>        каталог установки (по умолчанию /srv/opvpnbot)
+  --domain <домен>    настроить nginx + Let's Encrypt для вебхука ЮKassa и /healthz
+  --email <адрес>     e-mail для Let's Encrypt (обязателен при --domain)
+  --with-nginx        включить настройку nginx (домен спросит/возьмёт из окружения)
+  --no-nginx          не трогать nginx
+  --no-firewall       не включать ufw (по умолчанию включается)
   -h, --help          эта справка
 
 Примеры:
   sudo bash install.sh
+  sudo bash install.sh --domain bot.example.com --email you@example.com
   sudo bash install.sh --dir /srv/opvpnbot
   sudo bash install.sh --no-service --dir "$HOME/opvpnbot"
   sudo bash install.sh --update
@@ -76,11 +96,29 @@ while [ $# -gt 0 ]; do
       INSTALL_DIR="$1"
       ;;
     --dir=*)       INSTALL_DIR="${1#*=}" ;;
+    --domain)
+      shift
+      [ $# -gt 0 ] || die "После --domain нужен домен."
+      DOMAIN="$1"; WITH_NGINX=1
+      ;;
+    --domain=*)    DOMAIN="${1#*=}"; WITH_NGINX=1 ;;
+    --email)
+      shift
+      [ $# -gt 0 ] || die "После --email нужен адрес."
+      LEMC_EMAIL="$1"
+      ;;
+    --email=*)     LEMC_EMAIL="${1#*=}" ;;
+    --with-nginx)  WITH_NGINX=1 ;;
+    --no-nginx)    WITH_NGINX=0 ;;
+    --no-firewall) WITH_FIREWALL="false" ;;
     -h|--help)     usage; exit 0 ;;
     *)             die "Неизвестный аргумент: $1 (см. --help)" ;;
   esac
   shift
 done
+
+# Нормализуем домен: убираем схему и путь, если вставили URL целиком.
+DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 
 [ -n "$INSTALL_DIR" ] || INSTALL_DIR="$DEFAULT_DIR"
 INSTALL_DIR="${INSTALL_DIR%/}"
@@ -188,16 +226,34 @@ collect_config() {
       ;;
   esac
 
+  printf '\n%s\n' "${c_blu}=== Публичный адрес (nginx + HTTPS) ===${c_reset}"
+  ask DOMAIN "Домен для вебхука и /healthz (Enter — без nginx)" "${DOMAIN:-}"
+  if [ -n "${DOMAIN:-}" ]; then
+    WITH_NGINX=1
+    WEBHOOK_PUBLIC_URL="https://${DOMAIN}${WEBHOOK_PATH}"
+    ask_required LEMC_EMAIL "E-mail для Let's Encrypt (уведомления о сертификате)"
+  elif [ "$WITH_NGINX" -eq 1 ]; then
+    die "Указан --with-nginx, но домен не задан (--domain)."
+  fi
+  ask_choice WITH_FIREWALL "Включить firewall ufw (SSH/80/443 откроются автоматически)" "$WITH_FIREWALL" true false
+
   case ",${PAYMENT_METHODS}," in
     *,yookassa,*)
       printf '\n%s\n' "${c_blu}=== ЮKassa ===${c_reset}"
       ask YOOKASSA_SHOP_ID "shopId ЮKassa (Enter — пропустить)" ""
       if [ -n "${YOOKASSA_SHOP_ID:-}" ]; then
         ask_required YOOKASSA_SECRET_KEY "Секретный ключ ЮKassa"
-        ask_choice WEBHOOK_ENABLED "Включить вебхуки ЮKassa (нужен публичный HTTPS)" "false" false true
-        if [ "${WEBHOOK_ENABLED:-false}" = "true" ]; then
-          ask_required WEBHOOK_PUBLIC_URL "Публичный URL вебхука, например https://bot.example.com/yookassa/webhook"
-          ask_choice WEBHOOK_TRUST_PROXY "Перед ботом стоит reverse-proxy (nginx/caddy)" "false" false true
+        if [ "$WITH_NGINX" -eq 1 ]; then
+          # nginx и HTTPS настроит установщик — вебхук включаем сразу.
+          WEBHOOK_ENABLED="true"
+          WEBHOOK_TRUST_PROXY="true"
+          info "Вебхук ЮKassa включён автоматически: ${WEBHOOK_PUBLIC_URL}"
+        else
+          ask_choice WEBHOOK_ENABLED "Включить вебхуки ЮKassa (нужен публичный HTTPS)" "false" false true
+          if [ "${WEBHOOK_ENABLED:-false}" = "true" ]; then
+            ask_required WEBHOOK_PUBLIC_URL "Публичный URL вебхука, например https://bot.example.com/yookassa/webhook"
+            ask_choice WEBHOOK_TRUST_PROXY "Перед ботом стоит reverse-proxy (nginx/caddy)" "false" false true
+          fi
         fi
       fi
       ;;
@@ -242,6 +298,13 @@ write_env() {
     if [ "${WEBHOOK_TRUST_PROXY:-false}" = "true" ]; then
       set_env "$env_file" WEBHOOK_TRUST_PROXY true
     fi
+  fi
+
+  # За nginx бот слушает вебхук только на петле — снаружи трафик идёт через прокси.
+  if [ "$WITH_NGINX" -eq 1 ]; then
+    set_env "$env_file" WEBHOOK_HOST 127.0.0.1
+    set_env "$env_file" WEBHOOK_PATH "$WEBHOOK_PATH"
+    set_env "$env_file" WEBHOOK_PORT "$WEBHOOK_PORT"
   fi
 }
 
@@ -308,6 +371,138 @@ setup_venv() {
   info "Обновляю pip и устанавливаю зависимости..."
   "$VENV/bin/python" -m pip install --upgrade pip >/dev/null
   "$VENV/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
+}
+
+# --- nginx / firewall / проверка --------------------------------------------
+apt_install() {
+  # apt_install pkg... — ставит пакеты из репозиториев дистрибутива.
+  [ "$#" -gt 0 ] || return 0
+  have apt-get || die "Автонастройка поддерживается только на Debian/Ubuntu (нет apt-get)."
+  apt-get update -y >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+nginx_site_path() { printf '%s' "/etc/nginx/sites-available/${APP_NAME}"; }
+
+render_nginx_config() {
+  # render_nginx_config ШАБЛОН ФАЙЛ — подставляет значения в шаблон.
+  local tmpl="$1" out="$2"
+  [ -f "$tmpl" ] || die "Не найден шаблон nginx: $tmpl"
+  sed -e "s|@@DOMAIN@@|${DOMAIN}|g" \
+      -e "s|@@CERT@@|/etc/letsencrypt/live/${DOMAIN}/fullchain.pem|g" \
+      -e "s|@@KEY@@|/etc/letsencrypt/live/${DOMAIN}/privkey.pem|g" \
+      -e "s|@@WEBHOOK_PATH@@|${WEBHOOK_PATH}|g" \
+      -e "s|@@WEBHOOK_PORT@@|${WEBHOOK_PORT}|g" \
+      -e "s|@@HEALTH_PORT@@|${HEALTH_PORT}|g" \
+      "$tmpl" > "$out"
+}
+
+setup_nginx() {
+  local site cert_dir tmpl
+  site="$(nginx_site_path)"
+
+  # При --update домен не спрашивают — берём его из уже настроенного сайта.
+  if [ -z "${DOMAIN:-}" ] && [ -f "$site" ]; then
+    DOMAIN="$(awk '/server_name/{print $2; exit}' "$site" | tr -d ';')"
+  fi
+  if [ "$WITH_NGINX" -eq 0 ] && [ ! -f "$site" ]; then
+    return 0
+  fi
+  [ -n "${DOMAIN:-}" ] || { warn "nginx пропущен: домен не задан (--domain)."; return 0; }
+
+  cert_dir="/etc/letsencrypt/live/${DOMAIN}"
+  if [ -z "${LEMC_EMAIL:-}" ] && [ ! -d "$cert_dir" ]; then
+    warn "nginx пропущен: нет сертификата для ${DOMAIN} и не задан --email."
+    return 0
+  fi
+
+  info "Устанавливаю nginx и certbot..."
+  apt_install nginx certbot python3-certbot-nginx curl
+
+  tmpl="$INSTALL_DIR/deploy/nginx/opvpnbot.conf.tmpl"
+  [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/deploy/nginx/opvpnbot.conf.tmpl"
+
+  # Не перезаписываем чужой конфиг молча — сохраняем копию.
+  if [ -f "$site" ] && ! grep -q 'OPVPN (install.sh)' "$site"; then
+    local bak="${site}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$site" "$bak"
+    warn "Существующий конфиг nginx сохранён: ${bak}"
+  fi
+
+  if [ ! -d "$cert_dir" ]; then
+    info "Выпускаю сертификат Let's Encrypt для ${DOMAIN} (нужны DNS на этот сервер и открытый порт 80)..."
+    # Временный HTTP-блок: ACME-проверка проходит до появления сертификата.
+    cat > "$site" <<EOF
+# OPVPN (install.sh) — временный блок для выпуска сертификата
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    location / { return 200 'ok'; add_header Content-Type text/plain; }
+}
+EOF
+    ln -sf "$site" "/etc/nginx/sites-enabled/${APP_NAME}"
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx || warn "nginx не перезапустился."
+    if certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos \
+         --keep-until-expiring -m "$LEMC_EMAIL"; then
+      ok "Сертификат получен."
+    else
+      warn "certbot не выпустил сертификат — проверьте DNS домена и доступность порта 80 извне."
+    fi
+  else
+    info "Сертификат для ${DOMAIN} уже есть — оставляю как есть."
+  fi
+
+  if [ -d "$cert_dir" ]; then
+    render_nginx_config "$tmpl" "$site"
+    ln -sf "$site" "/etc/nginx/sites-enabled/${APP_NAME}"
+    nginx -t || die "nginx не принял конфиг ${site} — исправьте и повторите (файл можно заменить своим)."
+    systemctl reload nginx
+    ok "nginx настроен: https://${DOMAIN} (вебхук ${WEBHOOK_PATH}, /healthz)"
+  else
+    warn "Сертификата нет — оставлен временный HTTP-блок. Повторите: sudo bash install.sh --domain ${DOMAIN} --email ${LEMC_EMAIL}"
+  fi
+}
+
+ssh_port() {
+  local port
+  port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')" || true
+  if [ -z "$port" ]; then
+    port="$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)" || true
+  fi
+  printf '%s' "${port:-22}"
+}
+
+setup_firewall() {
+  [ "${WITH_FIREWALL:-true}" = "true" ] || return 0
+  info "Настраиваю ufw: SSH/80/443 открываются ДО включения, чтобы не потерять доступ..."
+  apt_install ufw
+  local port
+  port="$(ssh_port)"
+  ufw allow "${port}/tcp" >/dev/null
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
+  ufw default deny incoming >/dev/null
+  ufw default allow outgoing >/dev/null
+  ufw --force enable >/dev/null
+  ok "ufw включён: открыты SSH (${port}), 80, 443; порты бота (${WEBHOOK_PORT}, ${HEALTH_PORT}) — только локально."
+}
+
+verify_deploy() {
+  local url
+  if [ "$WITH_NGINX" -eq 1 ] && [ -n "${DOMAIN:-}" ] && [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+    url="https://${DOMAIN}/healthz"
+  else
+    url="http://127.0.0.1:${HEALTH_PORT}/healthz"
+  fi
+  have curl || return 0
+  info "Проверяю ${url} ..."
+  sleep 2
+  if curl -fsS --max-time 10 "$url"; then
+    printf '\n'
+    ok "Бот отвечает на /healthz."
+  else
+    warn "Проверка /healthz не прошла — смотрите: journalctl -u ${APP_NAME} -n 50"
+  fi
 }
 
 # --- systemd ----------------------------------------------------------------
@@ -408,6 +603,19 @@ main() {
 
   write_service
 
+  setup_nginx
+  setup_firewall
+  verify_deploy
+
+  local public=""
+  if [ "$WITH_NGINX" -eq 1 ] && [ -n "${DOMAIN:-}" ]; then
+    public="
+  Публичный адрес: https://${DOMAIN}
+  Вебхук ЮKassa:   https://${DOMAIN}${WEBHOOK_PATH}   (укажите тот же адрес в кабинете ЮKassa)
+  Healthcheck:     https://${DOMAIN}/healthz
+"
+  fi
+
   cat <<EOF
 
 $(ok "Готово!")
@@ -415,7 +623,7 @@ $(ok "Готово!")
   Каталог:   ${INSTALL_DIR}
   Конфиг:    ${INSTALL_DIR}/.env
   Данные:    ${INSTALL_DIR}/data/
-
+${public}
   Управление:
     systemctl status ${APP_NAME}
     journalctl -u ${APP_NAME} -f      # живые логи

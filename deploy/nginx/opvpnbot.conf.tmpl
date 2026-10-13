@@ -1,0 +1,47 @@
+# OPVPN (install.sh) — сайт nginx для вебхука ЮKassa и healthcheck.
+#
+# Файл генерируется установщиком и ПЕРЕЗАПИСЫВАЕТСЯ при каждом запуске:
+# не правьте копию в /etc/nginx/sites-available/opvpnbot — правьте этот шаблон.
+#
+# Подстановки (подставляет install.sh): домен, пути к сертификату,
+# путь и порт вебхука, порт healthcheck. Литеральных плейсхолдеров нет —
+# не добавляйте их в комментарии: sed подставит значения и там.
+
+server {
+    listen 80;
+    server_name @@DOMAIN@@;
+
+    # ACME-проверка Let's Encrypt (используется при продлении сертификата).
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    server_name @@DOMAIN@@;
+
+    ssl_certificate     @@CERT@@;
+    ssl_certificate_key @@KEY@@;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    # ЮKassa → бот: мгновенная выдача доступа сразу после оплаты.
+    location @@WEBHOOK_PATH@@ {
+        proxy_pass http://127.0.0.1:@@WEBHOOK_PORT@@@@WEBHOOK_PATH@@;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # ОБЯЗАТЕЛЬНО при WEBHOOK_TRUST_PROXY=true: иначе бот не увидит IP ЮKassa → 403.
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    # Healthcheck для внешнего uptime-монитора: GET /healthz → {"ok":true}.
+    location = /healthz {
+        proxy_pass http://127.0.0.1:@@HEALTH_PORT@@/healthz;
+        proxy_set_header Host $host;
+        # При желании ограничьте доступ только IP монитора:
+        # allow 203.0.113.10; deny all;
+    }
+}

@@ -6,7 +6,13 @@
 
 Полноценный Telegram-бот для продажи VPN-подписок на **aiogram 3**: витрина тарифов, оплата через **ЮKassa** (карты РФ, СБП, SberPay), автоматическая выдача ключей через панель **3x-ui**, промокоды, поддержка, напоминания и админ-панель прямо в Telegram.
 
-Установщик спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `opvpnbot` и запустит бота с автозапуском.
+Установщик (Debian/Ubuntu) спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `opvpnbot` и запустит бота с автозапуском. Если указать домен — он же настроит **nginx + HTTPS (Let's Encrypt)** для вебхука ЮKassa и `/healthz` и включит **ufw** (SSH/80/443 открываются ДО включения, чтобы не потерять доступ к серверу).
+
+Развернуть всё одной командой:
+
+```bash
+sudo bash install.sh --domain bot.example.com --email you@example.com --yes
+```
 
 Полезные режимы:
 
@@ -14,6 +20,7 @@
 sudo bash install.sh --update      # обновить код и перезапустить
 sudo bash install.sh --uninstall   # удалить службу (база и .env останутся)
 sudo bash install.sh --yes         # без вопросов, значения из переменных окружения
+sudo bash install.sh --no-nginx --no-firewall           # только бот, без nginx и ufw
 sudo bash install.sh --dir /srv/opvpnbot --no-service   # свой каталог, без systemd
 ```
 
@@ -119,6 +126,12 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 Нужен, если хотите **мгновенные** уведомления ЮKassa (вместо опроса раз в 3 минуты)
 и/или внешний монитор `/healthz`. Без домена бот отлично работает и без nginx — см.
 [docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md).
+
+**Проще всего — доверить это установщику:** `sudo bash install.sh --domain <домен> --email <адрес>`,
+и он сам поставит nginx + certbot, выпустит сертификат, отрендерит конфиг из
+[`deploy/nginx/opvpnbot.conf.tmpl`](deploy/nginx/opvpnbot.conf.tmpl), включит `WEBHOOK_ENABLED`,
+`WEBHOOK_TRUST_PROXY` и `WEBHOOK_HOST=127.0.0.1`, а также закроет лишние порты через ufw.
+Ниже — ручной вариант, если nginx уже занят другими сайтами или нужна своя конфигурация.
 
 ### 1. Установка nginx и HTTPS-сертификата
 
@@ -306,12 +319,13 @@ requirements-dev.txt       инструменты разработки (не о�
 requirements.lock.txt      lock-файл (точные версии всех зависимостей)
 .env.example               образец конфигурации → копируется в .env
 deploy/opvpnbot.service    образец systemd-юнита
+deploy/nginx/opvpnbot.conf.tmpl  шаблон сайта nginx (рендерит install.sh)
 docs/                      инструкции, архитектура, runbook оператора
 ```
 
 ## 🧯 Частые вопросы
 
-**Нужен ли домен?** Нет. Бот работает на long-polling; домен нужен только для мгновенных вебхуков ЮKassa. Без них бот сам проверяет оплату каждые 3 минуты, а пользователь может нажать «🔄 Проверить оплату».
+**Нужен ли домен?** Для мгновенных вебхуков ЮKassa — да (и его настроит установщик: `sudo bash install.sh --domain bot.example.com --email you@example.com`). Без домена бот тоже работает: сам проверяет оплату каждые 3 минуты, а пользователь может нажать «🔄 Проверить оплату».
 
 **Как обновить бота?** `sudo bash install.sh --update` (код скачается заново, `.env` и база сохранятся) или `git pull && systemctl restart opvpnbot`.
 

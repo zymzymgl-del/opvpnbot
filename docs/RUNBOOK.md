@@ -101,3 +101,22 @@ git pull && docker compose up -d --build
 - Ошибки в логе: `grep ' ERROR ' data/bot.log | tail`.
 - Свободное место под `data/` (БД + бэкапы).
 - CI зелёный (последний push/PR).
+
+## 9. nginx, сертификат, firewall
+
+Настраивается установщиком: `sudo bash install.sh --domain <домен> --email <адрес>`.
+
+- Конфиг сайта: `/etc/nginx/sites-available/opvpnbot` — **генерируется** из
+  [`deploy/nginx/opvpnbot.conf.tmpl`](../deploy/nginx/opvpnbot.conf.tmpl); не правьте копию вручную,
+  правьте шаблон и перезапустите `install.sh` (старый файл сохраняется рядом как `*.bak.<дата>`).
+- Продление сертификата — автоматом (пакет `certbot` ставит systemd-таймер). Проверка вручную:
+  `sudo certbot renew --dry-run`; показать сертификаты: `sudo certbot certificates`.
+- Забыли e-mail или домен сменился — просто повторно запустите
+  `sudo bash install.sh --domain <новый домен> --email <адрес> --update`.
+- **firewall (ufw)**: включён установщиком; SSH-порт определяется автоматически и открывается ДО
+  включения. Посмотреть: `sudo ufw status verbose`. Если доступ к серверу пропал — спасаться через
+  консоль провайдера: `sudo ufw allow <порт_ssh>/tcp && sudo ufw reload`.
+- Бот за nginx слушает вебхук только на петле (`WEBHOOK_HOST=127.0.0.1`) — порты 8080/8081 снаружи
+  закрыты, ломать ничего не надо. При отладке: `curl -fsS http://127.0.0.1:8081/healthz`.
+- Проверка всей цепочки: `curl -fsS https://<домен>/healthz` и тестовое уведомление из кабинета ЮKassa
+  (должно прийти без ошибок в `journalctl -u opvpnbot`).
