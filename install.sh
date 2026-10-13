@@ -65,7 +65,8 @@ OPVPN — установщик
   --uninstall         остановить и удалить systemd-службу (каталог, база и .env остаются)
   --yes               без интерактивных вопросов; значения берутся из переменных окружения
   --no-service        не создавать systemd-службу (только venv + .env)
-  --dir <путь>        каталог установки (по умолчанию /srv/opvpnbot)
+  --dir <путь>        каталог установки (по умолчанию — каталог запуска install.sh,
+                      иначе /srv/opvpnbot)
   --domain <домен>    настроить nginx + Let's Encrypt для вебхука ЮKassa и /healthz
   --email <адрес>     e-mail для Let's Encrypt (обязателен при --domain)
   --with-nginx        включить настройку nginx (домен спросит/возьмёт из окружения)
@@ -120,7 +121,17 @@ done
 # Нормализуем домен: убираем схему и путь, если вставили URL целиком.
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 
-[ -n "$INSTALL_DIR" ] || INSTALL_DIR="$DEFAULT_DIR"
+# Каталог установки. Если --dir не задан и скрипт запущен из каталога с кодом
+# (git-клон или распакованный архив), ставим РЯДОМ С КОДОМ — иначе легко получить
+# вторую копию в /srv и два конкурирующих процесса бота.
+if [ -z "$INSTALL_DIR" ]; then
+  if [ -f "$SCRIPT_DIR/bot.py" ] && [ "$SCRIPT_DIR" != "$DEFAULT_DIR" ]; then
+    INSTALL_DIR="$SCRIPT_DIR"
+    info "Каталог установки не задан — использую каталог запуска: ${INSTALL_DIR}"
+  else
+    INSTALL_DIR="$DEFAULT_DIR"
+  fi
+fi
 INSTALL_DIR="${INSTALL_DIR%/}"
 VENV="$INSTALL_DIR/.venv"
 
@@ -317,7 +328,9 @@ write_env() {
 install_system_deps() {
   [ "$(id -u)" -eq 0 ] || return 0
   if have apt-get; then
-    if ! python3 -c 'import venv' >/dev/null 2>&1 || ! have python3; then
+    # ensurepip отдельно: модуль venv может импортироваться, а пакета python3.x-venv
+    # нет — тогда создание окружения падает на ensurepip.
+    if ! have python3 || ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
       info "Устанавливаю системные зависимости (python3, venv, pip)..."
       apt-get update -y
       DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip ca-certificates
