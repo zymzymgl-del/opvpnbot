@@ -101,12 +101,77 @@ async def _edit_or_answer(
         await call.message.answer(text, reply_markup=markup)
 
 
+async def _hide_menu_window(message: Message) -> None:
+    """Гасит кнопки прежнего окна меню, чтобы в чате оставалось одно активное окно.
+
+    Вызывается перед показом нового окна-меню в ответ на текстовое сообщение
+    (/start, /menu, «Мои подписки»): старое окно остаётся видимым, но его
+    кнопки перестают работать («окно закрыто»). Правка невозможна (сообщение
+    слишком старое и т. п.) — молча пропускаем.
+    """
+    from app.keyboards import back_kb
+
+    try:
+        await message.edit_reply_markup(reply_markup=back_kb("menu:main", "🏠 Это окно закрыто — меню выше 👆"))
+    except Exception as exc:  # noqa: BLE001 — не критично
+        log.info("Не удалось погасить прежнее окно %s: %s", message.message_id, exc)
+
+
+#: Ключ в FSM-данных: id последнего сообщения с фото (QR). Фото нельзя
+#: отредактировать, поэтому при показе нового окна мы удаляем прежний QR
+#: (см. ``_show_photo_window`` / ``_drop_stale_photo``).
+PHOTO_WINDOW_KEY = "photo_window_id"
+
+
+async def _drop_stale_photo(state: FSMContext, bot: Bot, chat_id: int) -> None:
+    """Удаляет прежний QR из чата, если он был показан в этом состоянии."""
+    data = await state.get_data()
+    photo_id = data.get(PHOTO_WINDOW_KEY)
+    if isinstance(photo_id, int):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=photo_id)
+        except Exception as exc:  # noqa: BLE001 — уже удалено пользователем/тайминг
+            log.info("Не удалось удалить старый QR %s: %s", photo_id, exc)
+    await state.update_data(**{PHOTO_WINDOW_KEY: None})
+
+
+async def _show_photo_window(
+    call: CallbackQuery, state: FSMContext, bot: Bot, sub_id: int, markup, png: bytes, caption: str,
+) -> None:
+    """QR «в том же окне»: новый QR заменяет прежний, а не копится под меню.
+
+    Telegram не позволяет редактировать медиа, поэтому делаем так:
+      * удаляем прежний QR (если он был);
+      * шлём фото с кнопками окна («Назад к подписке», «Все подписки»);
+      * гасим кнопки прежнего текстового окна — активным остаётся окно на
+        сообщении с QR, старое превращается в неактивную историю.
+    """
+    from aiogram.types import BufferedInputFile
+
+    await _drop_stale_photo(state, bot, call.message.chat.id)
+    photo = await call.message.answer_photo(
+        BufferedInputFile(png, filename="vpn-qr.png"),
+        caption=caption,
+        reply_markup=markup,
+    )
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=back_kb(f"sub:view:{sub_id}", "🏠 Окно закрыто — QR ниже 👇"))
+    except Exception as exc:  # noqa: BLE001
+        log.info("Не удалось погасить окно под QR %s: %s", call.message.message_id, exc)
+    await state.update_data(**{PHOTO_WINDOW_KEY: photo.message_id})
+
+
 async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
     await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
 
 
 async def _send_menu_window(message: Message, text: str, cfg: Config) -> None:
-    """Показывает окно меню с инлайн-кнопками (режим одного окна)."""
+    """Показывает окно меню с инлайн-кнопками (режим одного окна).
+
+    Прежнее активное окно гасится — в чате остаётся одно рабочее меню.
+    """
+    await _hide_menu_window(message)
     await message.answer(
         text, reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
 
@@ -126,6 +191,18 @@ async def _prompt_window(call: CallbackQuery, state: FSMContext, text: str, mark
     await _edit_or_answer(call, text, markup)
 
 
+async def _ask_window(call: CallbackQuery, state: FSMContext, text: str, markup=None) -> None:
+    """Начало шага ввода из админ-меню: окно создаётся на месте последнего сообщения.
+
+    Правим то же сообщение, где была нажата кнопка (обычно это окно раздела —
+    карточка пользователя, список тарифов и т. п.), запоминаем его id, чтобы
+    следующий текстовый шаг заменил именно его, а не добавил новое сообщение.
+    """
+    window_id = call.message.message_id
+    await _remember_window(state, window_id)
+    await _edit_or_answer(call, text, markup)
+
+
 async def _apply_window(bot: Bot, chat_id: int, window_id, text: str, markup=None) -> None:
     """Результат ввода: правит окно (если помним его id), иначе шлёт новое сообщение."""
     if isinstance(window_id, int):
@@ -135,6 +212,26 @@ async def _apply_window(bot: Bot, chat_id: int, window_id, text: str, markup=Non
         except Exception as exc:  # окно могло быть удалено — не критично
             log.info("Не удалось обновить окно %s: %s", window_id, exc)
     await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+async def _answer_window(message: Message, state: FSMContext, text: str, markup=None) -> None:
+    """Ответ на текстовое сообщение в том же окне (режим одного окна).
+
+    Если бот уже правил окно этого шага — редактируем его; если окно было
+    создано заново (правка недоступна) или его id неизвестен — отвечаем на
+    сообщение пользователя, чтобы диалог не превращался в вереницу новых
+    сообщений.
+    """
+    data = await state.get_data()
+    window_id = data.get(UI_WINDOW_KEY)
+    if isinstance(window_id, int) and window_id != message.message_id:
+        try:
+            await message.bot.edit_message_text(
+                text, chat_id=message.chat.id, message_id=window_id, reply_markup=markup)
+            return
+        except Exception as exc:  # окно недоступно для правки — уходим в ответ
+            log.info("Не удалось обновить окно %s: %s", window_id, exc)
+    await message.answer(text, reply_markup=markup)
 
 
 class PromoStates(StatesGroup):
@@ -197,7 +294,8 @@ async def msg_legacy_reply_button(message: Message, cfg: Config) -> None:
 
 
 @router.callback_query(F.data == "menu:main")
-async def cb_main_menu(call: CallbackQuery, cfg: Config, state: FSMContext) -> None:
+async def cb_main_menu(call: CallbackQuery, cfg: Config, state: FSMContext, bot: Bot) -> None:
+    await _drop_stale_photo(state, bot, call.message.chat.id)
     await state.clear()
     await _show_main_menu(call, cfg)
     await call.answer()
@@ -301,11 +399,20 @@ async def cb_buy(call: CallbackQuery, db: Database, cfg: Config) -> None:
         if limit > 0:
             pending = await db.count_pending_orders(call.from_user.id)
             if pending >= limit:
-                await call.answer(
-                    f"⚠️ У вас уже {pending} неоплаченных заказов. "
-                    "Оплатите или отмените их (в истории заказов), затем оформите новый.",
-                    show_alert=True,
+                # Не только alert: показываем подсказку в самом окне, чтобы его
+                # можно было закрыть кнопкой «🛒 Купить» (режим одного окна).
+                await _edit_or_answer(
+                    call,
+                    f"⚠️ У вас уже <b>{pending}</b> неоплаченных заказов.\n\n"
+                    "Оплатите или отмените их — «👤 Профиль» → «📜 История заказов» — "
+                    "и после этого оформите новый.",
+                    InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="📜 История заказов", callback_data="orders:history")],
+                        [InlineKeyboardButton(text="🛒 Купить VPN", callback_data="menu:buy")],
+                        [InlineKeyboardButton(text="◀️ В меню", callback_data="menu:main")],
+                    ]),
                 )
+                await call.answer()
                 return
         order_id = await db.create_order(
             user_id=call.from_user.id, plan_code=code, amount=int(plan["price"]),
@@ -465,8 +572,40 @@ async def _render_checkout(call: CallbackQuery, cfg: Config, order_id: int, amou
         "После оплаты вернитесь в бот и нажмите «🔄 Проверить оплату». "
         "Если включены вебхуки — доступ выдастся автоматически."
     )
-    await call.message.edit_text(text, reply_markup=checkout_kb(url, order_id) if url
-                                 else back_kb(f"order:show:{order_id}"))
+    await _edit_or_answer(call, text,
+                          checkout_kb(url, order_id) if url else back_kb(f"order:show:{order_id}"))
+
+
+async def _payment_pending_window(
+    call: CallbackQuery, cfg: Config, db: Database, bot: Bot, order_id: int, exc: Exception,
+) -> None:
+    """Оплата прошла, а панель не отдала конфиг: оставляем рабочее окно оплаты.
+
+    Заказ уже помечен оплаченным (списание происходит в ``complete_order`` до
+    обращения к панели), поэтому кнопка здесь — это повтор выдачи («Выдать
+    ключ»), а не проверка платежа.
+    """
+    order = await db.get_order(order_id)
+    plan = await db.get_plan(order["plan_code"]) if order else None
+    title = plan["title"] if plan else (order["plan_code"] if order else "")
+    amount = int(order["amount"]) if order else 0
+    text = (
+        f"⚠️ <b>Оплата получена, выдача задержалась</b>\n\n"
+        f"Заказ #{order_id} · {esc(title)} · <b>{price(amount, cfg.currency)}</b>\n"
+        f"{esc(str(exc))}\n\n"
+        "Мы уже уведомили администратора. Нажмите «🔑 Выдать ключ» — "
+        "попробуем получить конфиг снова; если не выйдет, поможет поддержка."
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Выдать ключ", callback_data=f"pay:check:{order_id}")],
+        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="menu:support")],
+    ])
+    await _edit_or_answer(call, text, markup)
+    await notify_admins(
+        bot, cfg,
+        f"🚨 <b>Платёж проведён, выдача не удалась</b>\nЗаказ #{order_id}, "
+        f"пользователь <code>{call.from_user.id}</code>\nОшибка: {esc(str(exc))}",
+    )
 
 
 @router.callback_query(F.data.startswith("pay:"))
@@ -490,9 +629,17 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             try:
                 await complete_order(bot, cfg, db, order_id, payment_id=paid_id)
             except PanelError as exc:
-                await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                # Выдача задержалась — окно должно остаться с кнопками (переиспользуем
+                # то же сообщение, а не только alert'ом).
+                await _edit_or_answer(
+                    call,
+                    f"⚠️ Оплата прошла, но выдать конфиг автоматически не получилось: {esc(exc)}\n"
+                    "Попробуйте ещё раз через минуту или напишите в поддержку.",
+                    checkout_kb(order["payment_url"] or "", order_id),
+                )
+                await call.answer()
                 return
-            await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+            await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
         else:
             await call.answer("Платёж пока не подтверждён. Оплатите по ссылке или подождите пару минут.",
                               show_alert=True)
@@ -500,7 +647,14 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
 
     if action == "yookassa":
         if yk is None:
-            await call.answer("Оплата картой временно недоступна, выберите другой способ.", show_alert=True)
+            # Окно остаётся рабочим: подсказку показываем в нём же, с выбором способа.
+            available = [m for m in cfg.payment_methods if m != "none"]
+            await _edit_or_answer(
+                call,
+                "💳 Оплата картой временно недоступна, выберите другой способ или напишите в поддержку.",
+                payment_methods_kb(available, order_id),
+            )
+            await call.answer()
             return
         # Один заказ — один счёт: если у заказа уже есть привязанный платёж,
         # переспрашиваем его статус в API и переиспользуем ту же ссылку.
@@ -580,7 +734,8 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
 # Мои ключи
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "menu:keys")
-async def cb_keys(call: CallbackQuery, db: Database) -> None:
+async def cb_keys(call: CallbackQuery, db: Database, state: FSMContext, bot: Bot) -> None:
+    await _drop_stale_photo(state, bot, call.message.chat.id)
     subs = await db.user_subscriptions(call.from_user.id)
     if not subs:
         await _edit_or_answer(
@@ -599,12 +754,13 @@ async def cb_keys(call: CallbackQuery, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("sub:view:"))
-async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
+async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config, state: FSMContext, bot: Bot) -> None:
     sub_id = int(call.data.rsplit(":", 1)[1])
     sub = await db.get_subscription(sub_id)
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
         return
+    await _drop_stale_photo(state, bot, call.message.chat.id)
     link = sub["sub_url"] or sub["vpn_key"] or ""
     text = (
         f"🔑 <b>Подписка #{sub_id}</b>\n\n"
@@ -669,9 +825,7 @@ async def cb_sub_copy(call: CallbackQuery, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("sub:qr:"))
-async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
-    from aiogram.types import BufferedInputFile
-
+async def cb_sub_qr(call: CallbackQuery, db: Database, state: FSMContext, bot: Bot) -> None:
     sub = await _load_own_sub(call, db)
     if sub is None:
         return
@@ -680,15 +834,13 @@ async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
     if png is None:
         await call.answer("Генерация QR недоступна (не установлен модуль qrcode).", show_alert=True)
         return
-    # Как и «Как подключиться», переключаемся в отдельное окно с кнопкой возврата;
-    # сам QR приходит новым сообщением (фото отредактировать нельзя).
-    await _edit_or_answer(
-        call,
-        f"📷 <b>QR-код подписки #{sub['id']}</b>\n\nОтправлен ниже сообщением — отсканируйте его в приложении VPN.",
-        _sub_back_kb(int(sub["id"])),
+    # Режим одного окна: фото нельзя отредактировать, поэтому новый QR
+    # заменяет прежний (удаляем старое фото), а кнопки старого текстового
+    # окна гасятся — активным становится окно на сообщении с QR.
+    await _show_photo_window(
+        call, state, bot, int(sub["id"]), _sub_back_kb(int(sub["id"])), png,
+        f"📷 QR-код подписки #{sub['id']} — отсканируйте его в приложении VPN.",
     )
-    await call.message.answer_photo(BufferedInputFile(png, filename="vpn-qr.png"),
-                                    caption="📷 Отсканируйте QR-код в приложении VPN")
     await call.answer()
 
 
@@ -822,7 +974,7 @@ async def cb_orders_history(call: CallbackQuery, db: Database, cfg: Config) -> N
             f"#{order['id']} · {esc(order['plan_code'])} · {price(int(order['amount']), cfg.currency)} · "
             f"{STATUS_RU.get(order['status'], order['status'])} · {order['created_at'][:10]}"
         )
-    await call.message.answer("\n".join(lines), reply_markup=back_kb("menu:profile", "◀️ В профиль"))
+    await _edit_or_answer(call, "\n".join(lines), back_kb("menu:profile", "◀️ В профиль"))
     await call.answer()
 
 
