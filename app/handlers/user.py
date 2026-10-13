@@ -96,15 +96,7 @@ async def _edit_or_answer(
     markup=None,
 ) -> None:
     """Правит текущее сообщение (режим одного окна), иначе шлёт новое."""
-    try:
-        await call.message.edit_text(text, reply_markup=markup)
-        ui.remember(call.message.chat.id, call.message.message_id)
-    except Exception as exc:  # noqa: BLE001 — ожидаемо для недоступных/старых сообщений
-        if "message can't be edited" not in str(exc).lower():
-            log.warning("Не удалось отредактировать меню: %s", exc)
-        sent = await call.message.answer(text, reply_markup=markup)
-        if getattr(sent, "message_id", None):
-            ui.remember(call.message.chat.id, sent.message_id)
+    await ui.ui_text_from_message(call.bot, call.message, text, markup)
 
 
 async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
@@ -238,7 +230,7 @@ async def cb_check_subscription(call: CallbackQuery, cfg: Config, bot: Bot) -> N
 # ---------------------------------------------------------------------------
 # Магазин: тарифы и оформление заказа
 # ---------------------------------------------------------------------------
-async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config) -> None:
+async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
     user_id = target.from_user.id if target.from_user else 0
     existing = await db.active_subscription(user_id) if user_id else None
     if existing is not None and not renewal_available(existing, cfg):
@@ -253,23 +245,17 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
             f"Окно продления откроется <b>{fmt_dt(opens_at)}</b>."
         )
         if isinstance(target, CallbackQuery):
-            try:
-                await target.message.edit_text(text)
-                ui.remember(target.message.chat.id, target.message.message_id)
-            except Exception:
-                sent = await target.message.answer(text)
-                if getattr(sent, "message_id", None):
-                    ui.remember(target.message.chat.id, sent.message_id)
+            await _edit_or_answer(target, text)
         else:
-            await target.answer(text)
+            await ui.ui_text(bot, target.chat.id, text)
         return
     plans = await db.active_plans()
     if not plans:
         text = "😔 Сейчас нет доступных тарифов. Загляните позже или напишите в поддержку."
         if isinstance(target, CallbackQuery):
-            await target.message.answer(text)
+            await _edit_or_answer(target, text)
         else:
-            await target.answer(text)
+            await ui.ui_text(bot, target.chat.id, text)
         return
     text = (
         "🛒 <b>Выберите тариф</b>\n\n"
@@ -279,15 +265,9 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
     )
     markup = plans_kb(plans, cfg.currency)
     if isinstance(target, CallbackQuery):
-        try:
-            await target.message.edit_text(text, reply_markup=markup)
-            ui.remember(target.message.chat.id, target.message.message_id)
-        except Exception:
-            sent = await target.message.answer(text, reply_markup=markup)
-            if getattr(sent, "message_id", None):
-                ui.remember(target.message.chat.id, sent.message_id)
+        await _edit_or_answer(target, text, markup)
     else:
-        await target.answer(text, reply_markup=markup)
+        await ui.ui_text(bot, target.chat.id, text, markup)
 
 
 @router.callback_query(F.data == "menu:buy")
@@ -300,7 +280,7 @@ async def cb_plans(call: CallbackQuery, db: Database, cfg: Config, state: FSMCon
         await _show_order(call, db, cfg, int(order["id"]))
         await call.answer()
         return
-    await _show_plans(call, db, cfg)
+    await _show_plans(call, db, cfg, call.bot)
     await call.answer()
 
 
@@ -367,13 +347,7 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
     text += f"\nК оплате: <b>{price(int(order['amount']), cfg.currency)}</b>"
     available = [m for m in cfg.payment_methods if m != "none"]
     markup = payment_methods_kb(available, order_id)
-    try:
-        await target.message.edit_text(text, reply_markup=markup)
-        ui.remember(target.message.chat.id, target.message.message_id)
-    except Exception:
-        sent = await target.message.answer(text, reply_markup=markup)
-        if getattr(sent, "message_id", None):
-            ui.remember(target.message.chat.id, sent.message_id)
+    await _edit_or_answer(target, text, markup)
 
 
 async def _reissue_blocked(call: CallbackQuery, order, cfg: Config) -> bool:
@@ -414,10 +388,7 @@ async def cb_order_plans(call: CallbackQuery, db: Database, cfg: Config) -> None
             "Выберите новый тариф — он заменит текущий в этом же заказе "
             "(второй заказ не создаётся).")
     markup = switch_plans_kb(plans, cfg.currency, order_id)
-    try:
-        await call.message.edit_text(text, reply_markup=markup)
-    except Exception:
-        await call.message.answer(text, reply_markup=markup)
+    await _edit_or_answer(call, text, markup)
     await call.answer()
 
 
@@ -663,7 +634,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             except PanelError as exc:
                 await call.answer(f"Выдача не удалась: {exc}. Повторим автоматически.", show_alert=True)
                 return
-            await call.message.edit_text("✅ Подписка выдана! Ключ отправлен отдельным сообщением.")
+            await _edit_or_answer(call, "✅ Подписка выдана! Ключ отправлен отдельным сообщением.")
             await call.answer()
             return
         paid_id: str | None = None
@@ -678,7 +649,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             except PanelError as exc:
                 await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
                 return
-            await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+            await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
         else:
             await call.answer("Платёж пока не подтверждён. Оплатите по ссылке или подождите пару минут.",
                               show_alert=True)
@@ -706,7 +677,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 except PanelError as exc:
                     await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
                     return
-                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
                 await call.answer()
                 return
         # Один заказ — один счёт: если у заказа уже есть привязанный платёж,
@@ -730,7 +701,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 except PanelError as exc:
                     await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
                     return
-                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
                 await call.answer("Оплата найдена")
                 return
             if yk.payment_is_payable(payment):
@@ -769,7 +740,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 except PanelError as exc:
                     await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
                     return
-                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
                 await call.answer()
                 return
             await _render_checkout(call, cfg, order_id, amount,

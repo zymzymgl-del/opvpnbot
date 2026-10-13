@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
+from app import ui
 from app.config import Config
 from app.db import Database
 from app.keyboards import subscription_check_kb
@@ -126,13 +127,10 @@ class RequiredChannelMiddleware(BaseMiddleware):
         )
         markup = subscription_check_kb(self.cfg.required_channels)
         if isinstance(event, CallbackQuery):
-            try:
-                await event.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
-            except Exception:
-                await event.message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+            await ui.ui_text_from_message(data["bot"], event.message, text, markup)
             await event.answer()
         elif isinstance(event, Message):
-            await event.answer(text, reply_markup=markup, disable_web_page_preview=True)
+            await ui.ui_text(data["bot"], event.chat.id, text, markup)
         return None
 
 

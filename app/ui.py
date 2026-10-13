@@ -41,6 +41,21 @@ def forget(chat_id: int) -> None:
     _windows.pop(int(chat_id), None)
 
 
+async def ui_text_from_message(bot: Bot, message: Any, text: str,
+                               reply_markup: Any = None) -> None:
+    """Перерисовывает окно, на котором нажали кнопку, если реестр ещё пуст.
+
+    Это важно после перезапуска: callback может прийти от старого текстового
+    или фото-сообщения, а id окна в памяти уже отсутствует.
+    """
+    chat_id = int(message.chat.id)
+    if chat_id not in _windows:
+        message_id = getattr(message, "message_id", None)
+        if message_id:
+            remember(chat_id, message_id)
+    await ui_text(bot, chat_id, text, reply_markup)
+
+
 async def _delete(bot: Bot, chat_id: int, message_id: int) -> None:
     try:
         await bot.delete_message(chat_id, message_id)

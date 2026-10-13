@@ -714,6 +714,19 @@ async def run() -> None:
 
             self.message = _Msg()
 
+            class _UiBot:
+                async def edit_message_text(_self, text, chat_id=None, message_id=None,
+                                            reply_markup=None, **kw):
+                    return await self.message.edit_text(text, reply_markup=reply_markup)
+
+                async def send_message(_self, chat_id, text, reply_markup=None, **kw):
+                    return await self.message.answer(text, reply_markup=reply_markup)
+
+                async def delete_message(_self, chat_id, message_id=None, **kw):
+                    return True
+
+            self.bot = _UiBot()
+
         async def answer(self, text="", show_alert=False):
             self.answers.append(text)
 
@@ -815,6 +828,34 @@ async def run() -> None:
     c3 = FakeCall(stale_order, 9999)
     await user_mod.cb_pay(c3, db, cfg, bot, yk=fake_yk)
     check("чужому пользователю отказано", "не найден" in " ".join(c3.answers), str(c3.answers))
+
+    print("\n16. Одно окно: переход с фото на текст")
+    from app import ui
+
+    class PhotoWindowBot:
+        def __init__(self):
+            self.events = []
+
+        async def edit_message_text(self, text, chat_id, message_id, **kwargs):
+            self.events.append(("edit", message_id))
+            raise RuntimeError("there is no text in the message to edit")
+
+        async def delete_message(self, chat_id, message_id):
+            self.events.append(("delete", message_id))
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.events.append(("send", text))
+            return SimpleNamespace(message_id=902)
+
+    photo_bot = PhotoWindowBot()
+    photo_message = SimpleNamespace(chat=SimpleNamespace(id=900), message_id=901)
+    ui.forget(900)
+    await ui.ui_text_from_message(photo_bot, photo_message, "Текстовое окно")
+    check("фото удаляется перед отправкой текстового окна",
+          photo_bot.events == [("edit", 901), ("delete", 901), ("send", "Текстовое окно")]
+          and ui.get_window(900) == 902,
+          str(photo_bot.events))
+    ui.forget(900)
 
     await db.close()
     print(f"\n{'=' * 60}\nИТОГО: {len(PASSED)} успешно, {len(FAILED)} ошибок")
