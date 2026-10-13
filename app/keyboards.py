@@ -175,8 +175,19 @@ def confirm_kb(yes_data: str, no_data: str = "adm:svc",
     ])
 
 
-def admin_order_kb(order_id: int) -> InlineKeyboardMarkup:
+def admin_order_kb(order_id: int, *, needs_regrant: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки заказа в админке.
+
+    ``needs_regrant=True`` — заказ УЖЕ оплачен, но выдача не удалась: вместо
+    «подтвердить/отклонить» показываем повтор выдачи (отклонять тут нечего —
+    деньги получены, нужно выдать доступ).
+    """
     builder = InlineKeyboardBuilder()
+    if needs_regrant:
+        builder.button(text="🔁 Выдать снова", callback_data=f"adm:order:regrant:{order_id}")
+        builder.button(text="◀️ Назад", callback_data="adm:panel")
+        builder.adjust(1)
+        return builder.as_markup()
     builder.button(text="✅ Подтвердить оплату", callback_data=f"adm:order:approve:{order_id}")
     builder.button(text="❌ Отклонить", callback_data=f"adm:order:reject:{order_id}")
     builder.adjust(2)

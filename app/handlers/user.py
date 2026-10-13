@@ -46,6 +46,7 @@ from app.services.subs import (
     complete_order,
     grant_subscription,
     notify_admins,
+    payment_ids_of,
     renewal_available,
     renewal_window_days,
 )
@@ -296,6 +297,17 @@ async def cb_buy(call: CallbackQuery, db: Database, cfg: Config) -> None:
     if reuse is not None:
         order_id = int(reuse["id"])
     else:
+        # Один незакрытый заказ на пользователя: пока есть неоплаченный заказ на
+        # ДРУГОЙ тариф, новый не создаём — иначе можно «наплодить» счёта и
+        # оплатить не тот (деньги списываются, период не выдаётся).
+        other = await db.user_pending_order(call.from_user.id, "subscription")
+        if other is not None:
+            await _show_order(call, db, cfg, int(other["id"]))
+            await call.answer(
+                "⚠️ У вас уже есть неоплаченный заказ. Оплатите или отмените его, затем оформите новый.",
+                show_alert=True,
+            )
+            return
         # Анти-абьюз: не даём копить неоплаченные счета (защита от спама заказами).
         limit = cfg.max_pending_orders
         if limit > 0:
@@ -342,6 +354,18 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
 def _is_owner(order, user_id: int) -> bool:
     """Заказ принадлежит пользователю (защита от доступа к чужому заказу по id)."""
     return order is not None and int(order["user_id"]) == int(user_id)
+
+
+def _payment_amount(payment: dict) -> float | None:
+    """Сумма платежа ЮKassa в рублях (None, если объект неполный).
+
+    Нужна, чтобы решить, можно ли переиспользовать уже выставленный счёт:
+    счёт на другую сумму не подойдёт (после применения промокода).
+    """
+    try:
+        return float(payment["amount"]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 @router.callback_query(F.data.startswith("order:cancel:"))
@@ -439,6 +463,12 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
         if reserved_code:
             # На заказе был другой промокод — освобождаем его использование.
             await db.release_promo(reserved_code, message.from_user.id)
+        if order["payment_id"]:
+            # Счёт уже выставлялся. Его не отвязываем (если он успел оплатиться,
+            # заказ всё равно должен быть выдан), а кнопка оплаты заметит
+            # расхождение суммы и выставит новый счёт.
+            log.info("Заказ #%s: сумма изменилась после выставления счёта %s",
+                     order_id, order["payment_id"])
         await db.set_order_promo(int(order_id), new_amount, discount, code)
     await _apply_window(
         bot, message.chat.id, window_id,
@@ -464,15 +494,35 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
     if not _is_owner(order, call.from_user.id):
         await call.answer("Заказ не найден.", show_alert=True)
         return
-    if order["status"] != "pending":
-        await call.answer("Заказ уже неактуален.", show_alert=True)
+    # Заказ, оплаченный, но с упавшей выдачей (grant_error), — НЕ «неактуален»:
+    # он ждёт повтора выдачи, иначе деньги списаны, а периода нет.
+    needs_regrant = order["status"] == "paid" and bool(order["grant_error"])
+    if order["status"] != "pending" and not needs_regrant:
+        # Оплаченный заказ: повторное нажатие «Оплатить» НЕ должно вести в ЮKassa
+        # (иначе пользователь платит второй раз за уже выданный доступ).
+        if order["status"] == "paid":
+            await call.answer("✅ Заказ уже оплачен.", show_alert=True)
+        else:
+            await call.answer("Заказ уже неактуален.", show_alert=True)
         return
     amount = int(order["amount"])
 
     if action == "check":
+        if needs_regrant:
+            try:
+                await complete_order(bot, cfg, db, order_id, payment_id=order["payment_id"])
+            except PanelError as exc:
+                await call.answer(f"Выдача не удалась: {exc}. Повторим автоматически.", show_alert=True)
+                return
+            await call.message.edit_text("✅ Подписка выдана! Ключ отправлен отдельным сообщением.")
+            await call.answer()
+            return
         paid_id: str | None = None
-        if order["payment_id"] and yk is not None and await yk.is_paid(order["payment_id"], amount):
-            paid_id = order["payment_id"]
+        if yk is not None:
+            for pid in payment_ids_of(order):
+                if await yk.is_paid(pid, amount):
+                    paid_id = pid
+                    break
         if paid_id:
             try:
                 await complete_order(bot, cfg, db, order_id, payment_id=paid_id)
@@ -489,19 +539,72 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         if yk is None:
             await call.answer("Оплата картой временно недоступна, выберите другой способ.", show_alert=True)
             return
-        try:
-            payment = await yk.create_payment(
-                amount_rub=amount,
-                description=f"VPN {order['plan_code']} (заказ #{order_id})",
-                metadata={"order_id": order_id, "user_id": call.from_user.id},
-            )
-        except PaymentError as exc:
-            log.error("ЮKassa: %s", exc)
-            await call.answer("Не удалось создать платёж, попробуйте позже.", show_alert=True)
-            await notify_admins(bot, cfg, f"⚠️ Ошибка ЮKassa по заказу #{order_id}: {esc(exc)}")
+        # ВАЖНО: не создаём второй счёт по тому же заказу. Иначе payment_id
+        # перезаписывается, и оплаченный по первому счёту заказ становится
+        # невидимым для проверки (деньги уходят, период не выдаётся).
+        # Перебираем ВСЕ счёта заказа (история в orders.payment_ids): если хоть
+        # один оплачен — выдаём доступ, если есть неоплаченный — отдаём его
+        # ссылку, и только если все счёта отменены, выставляем новый.
+        url = ""
+        processing = False
+        paid_not_matching = False
+        ids = payment_ids_of(order)
+        for pid in ids:
+            try:
+                existing = await yk.get_payment(pid)
+            except PaymentError as exc:
+                # Сетевой сбой чтения счёта — новый счёт НЕ создаём, иначе оплата
+                # по уже выставленному счёту «потеряется».
+                log.warning("Заказ #%s: не удалось прочитать счёт %s: %s", order_id, pid, exc)
+                await call.answer("⏳ Не удалось проверить оплату. Попробуйте через минуту.",
+                                  show_alert=True)
+                return
+            if yk.payment_is_valid(existing, amount):
+                # Счёт уже оплачен — завершаем заказ сразу (повторный обработчик безвреден).
+                try:
+                    await complete_order(bot, cfg, db, order_id, payment_id=pid)
+                except PanelError as exc:
+                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    return
+                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                return
+            status = existing.get("status")
+            if status == "pending" and not url:
+                # Счёт ещё не оплачен — переиспользуем его же. Сумма могла измениться
+                # только вниз (промокод после выставления счёта) — переплату принимаем.
+                url = (existing.get("confirmation") or {}).get("confirmation_url", "") or ""
+                if _payment_amount(existing) != amount:
+                    log.info("Заказ #%s: сумма заказа %s, счёт %s на %s — переиспользуем счёт",
+                             order_id, amount, pid, _payment_amount(existing))
+            elif status == "waiting_for_capture":
+                processing = True
+            elif status == "succeeded":
+                paid_not_matching = True
+        if not url and processing:
+            await call.answer("⏳ Оплата обрабатывается — нажмите «Проверить оплату» через минуту.",
+                              show_alert=True)
             return
-        await db.set_order_payment(order_id, payment["id"], method="yookassa")
-        url = (payment.get("confirmation") or {}).get("confirmation_url", "")
+        if not url and paid_not_matching:
+            await call.answer("✅ Счёт уже оплачен. Если доступ не выдан — напишите в поддержку.",
+                              show_alert=True)
+            return
+        if not url and ids:
+            log.warning("Заказ #%s: все счёта (%s) непригодны — выставляем новый",
+                        order_id, ",".join(ids))
+        if not url:
+            try:
+                payment = await yk.create_payment(
+                    amount_rub=amount,
+                    description=f"VPN {order['plan_code']} (заказ #{order_id})",
+                    metadata={"order_id": order_id, "user_id": call.from_user.id},
+                )
+            except PaymentError as exc:
+                log.error("ЮKassa: %s", exc)
+                await call.answer("Не удалось создать платёж, попробуйте позже.", show_alert=True)
+                await notify_admins(bot, cfg, f"⚠️ Ошибка ЮKassa по заказу #{order_id}: {esc(exc)}")
+                return
+            await db.set_order_payment(order_id, payment["id"], method="yookassa")
+            url = (payment.get("confirmation") or {}).get("confirmation_url", "")
         text = (
             f"💳 <b>Оплата заказа #{order_id}</b>\n\n"
             f"Сумма: <b>{price(amount, cfg.currency)}</b>\n"

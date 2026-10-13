@@ -48,8 +48,10 @@ CREATE TABLE IF NOT EXISTS orders (
     kind            TEXT NOT NULL DEFAULT 'subscription',
     status          TEXT NOT NULL DEFAULT 'pending',
     payment_id      TEXT,
+    payment_ids     TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
     paid_at         TEXT,
+    grant_error     TEXT NOT NULL DEFAULT '',
     note            TEXT
 );
 
@@ -219,9 +221,10 @@ class Database:
         """Идемпотентные миграции для уже существующих БД.
 
         Новые БД получают актуальную схему из ``SCHEMA``; старые догоняются
-        здесь: колонка ``orders.promo_reserved`` и уникальность пары
-        ``promo_uses(code, user_id)`` (перед созданием индекса дубликаты
-        сводятся к самой ранней записи).
+        здесь: колонки ``orders.promo_reserved``, ``orders.grant_error`` и
+        ``orders.payment_ids``, а также уникальность пары
+        ``promo_uses(code, user_id)`` (перед созданием
+        индекса дубликаты сводятся к самой ранней записи).
         """
         async with self._lock:
             cur = await self.conn.execute("PRAGMA table_info(orders)")
@@ -229,6 +232,14 @@ class Database:
             if "promo_reserved" not in columns:
                 await self.conn.execute(
                     "ALTER TABLE orders ADD COLUMN promo_reserved INTEGER NOT NULL DEFAULT 0"
+                )
+            if "grant_error" not in columns:
+                await self.conn.execute(
+                    "ALTER TABLE orders ADD COLUMN grant_error TEXT NOT NULL DEFAULT ''"
+                )
+            if "payment_ids" not in columns:
+                await self.conn.execute(
+                    "ALTER TABLE orders ADD COLUMN payment_ids TEXT NOT NULL DEFAULT ''"
                 )
             await self.conn.execute(
                 "DELETE FROM promo_uses WHERE id NOT IN "
@@ -417,18 +428,65 @@ class Database:
         await self.execute("UPDATE orders SET promo_reserved = 0 WHERE id = ?", (order_id,))
 
     async def set_order_promo(self, order_id: int, amount: int, discount: int, promo_code: str) -> None:
-        """Применяет промокод к заказу: новая сумма/скидка и резерв использования."""
+        """Применяет промокод к заказу: новая сумма/скидка и резерв использования.
+
+        Уже созданный счёт НЕ отвязываем: если он успел оплатиться, заказ обязан
+        быть выдан (сверка принимает переплату). Кнопка оплаты сама заметит
+        расхождение суммы и выставит новый счёт.
+        """
         await self.execute(
             "UPDATE orders SET amount = ?, discount = ?, promo_code = ?, promo_reserved = 1 WHERE id = ?",
             (amount, discount, promo_code, order_id),
         )
 
-    async def set_order_payment(self, order_id: int, payment_id: str, method: str = "yookassa") -> None:
-        """Фиксирует у заказа способ оплаты и id платежа во внешней системе."""
-        await self.execute(
-            "UPDATE orders SET method = ?, payment_id = ? WHERE id = ?",
-            (method, payment_id, order_id),
+    async def set_order_grant_error(self, order_id: int, error: str) -> None:
+        """Помечает оплаченный заказ как «выдача не удалась» (или снимает метку).
+
+        Пустая строка = подписка выдана. Непустая = деньги получены, но доступ
+        не выдан: такой заказ обязан быть повторно обработан (``orders_needing_grant``),
+        иначе оплата навсегда «зависнет» без периода.
+        """
+        await self.execute("UPDATE orders SET grant_error = ? WHERE id = ?", (error[:500], order_id))
+
+    async def orders_needing_grant(self, limit: int = 20) -> list[aiosqlite.Row]:
+        """Оплаченные заказы, по которым выдача подписки не удалась (нужен повтор)."""
+        return await self.fetchall(
+            "SELECT * FROM orders WHERE status = 'paid' AND grant_error <> '' ORDER BY id LIMIT ?",
+            (limit,),
         )
+
+    async def set_order_payment(self, order_id: int, payment_id: str, method: str = "yookassa") -> None:
+        """Фиксирует у заказа способ оплаты и id платежа во внешней системе.
+
+        Все выставленные счета заказа собираются в ``orders.payment_ids``
+        (через запятую): по ним вебхук, поллер и кнопка «Проверить оплату»
+        находят заказ, даже если ``payment_id`` был перезаписан другим счётом.
+        """
+        row = await self.fetchone("SELECT payment_ids FROM orders WHERE id = ?", (order_id,))
+        ids = [p for p in ((row["payment_ids"] if row is not None else "") or "").split(",") if p]
+        if payment_id not in ids:
+            ids.append(payment_id)
+        await self.execute(
+            "UPDATE orders SET method = ?, payment_id = ?, payment_ids = ? WHERE id = ?",
+            (method, payment_id, ",".join(ids), order_id),
+        )
+
+    async def order_by_payment(self, payment_id: str) -> Optional[aiosqlite.Row]:
+        """Заказ по любому выставленному счёту (не только последнему).
+
+        Нужен для «восстановления» платежей, которые перестали быть видны по
+        ``orders.payment_id`` (например, платёж по счёту, который позже был
+        перезаписан другим счётом).
+        """
+        row = await self.fetchone(
+            "SELECT * FROM orders WHERE payment_id = ? ORDER BY id DESC LIMIT 1", (payment_id,)
+        )
+        if row is not None:
+            return row
+        for row in await self.fetchall("SELECT * FROM orders WHERE payment_ids <> '' ORDER BY id DESC LIMIT 200"):
+            if payment_id in (row["payment_ids"] or "").split(","):
+                return row
+        return None
 
     async def claim_order_for_payment(self, order_id: int, payment_id: str | None = None) -> bool:
         """Атомарный переход заказа pending → paid («захват» заказа).
@@ -465,6 +523,19 @@ class Database:
             "SELECT * FROM orders WHERE user_id = ? AND plan_code = ? AND kind = ? AND status = 'pending' "
             "ORDER BY id DESC LIMIT 1",
             (user_id, plan_code, kind),
+        )
+
+    async def user_pending_order(self, user_id: int,
+                                 kind: str = "subscription") -> Optional[aiosqlite.Row]:
+        """Любой незакрытый заказ пользователя (любой тариф).
+
+        Нужен, чтобы не давать плодить заказы на разные тарифы: пока есть один
+        неоплаченный, новый не создаётся (пользователь платит или отменяет его).
+        """
+        return await self.fetchone(
+            "SELECT * FROM orders WHERE user_id = ? AND kind = ? AND status = 'pending' "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, kind),
         )
 
     async def pending_orders(self, method: str | None = None, limit: int = 20) -> list[aiosqlite.Row]:

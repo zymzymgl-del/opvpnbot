@@ -230,6 +230,34 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
 # ---------------------------------------------------------------------------
 # Оплата заказа
 # ---------------------------------------------------------------------------
+#: Локи на заказ: одновременно выдавать/повторять выдачу должен ровно один вызов
+#: (поллер + кнопка «Проверить оплату» + вебхук работают в одном процессе).
+_grant_locks: dict[int, asyncio.Lock] = {}
+
+
+def _grant_lock(order_id: int) -> asyncio.Lock:
+    if len(_grant_locks) > 500:  # подчищаем отпущенные локи, чтобы словарь не рос
+        for oid, lock in list(_grant_locks.items()):
+            if not lock.locked():
+                del _grant_locks[oid]
+    return _grant_locks.setdefault(order_id, asyncio.Lock())
+
+
+def payment_ids_of(order) -> list[str]:
+    """Все выставленные счёта заказа.
+
+    Основной источник — ``orders.payment_ids`` (история счетов); запасной —
+    ``orders.payment_id`` (на случай строк из старого кода или усечённого
+    набора столбцов). Нужно, чтобы оплата по любому счёту заказа находила заказ.
+    """
+    try:
+        raw = order["payment_ids"] or ""
+    except (IndexError, KeyError, TypeError):
+        raw = ""
+    raw = raw or order["payment_id"] or ""
+    return [pid for pid in raw.split(",") if pid]
+
+
 async def complete_order(bot: Bot, cfg: Config, db: Database, order_id: int,
                          *, payment_id: str | None = None, silent: bool = False) -> bool:
     """Помечает заказ оплаченным и выдаёт подписку.
@@ -237,63 +265,97 @@ async def complete_order(bot: Bot, cfg: Config, db: Database, order_id: int,
     Идемпотентность обеспечивается атомарным переходом pending -> paid
     (``db.claim_order_for_payment``): при одновременных вебхуке, опросе и
     нажатии «Проверить оплату» заказ будет завершён ровно одним вызовом.
+
+    Ровно как важно и обратное: если заказ уже ``paid``, но в прошлый раз
+    ``grant_subscription`` упала (``orders.grant_error``), подписка НЕ выдана и
+    заказ нельзя считать завершённым. Такой заказ повторяется автоматически
+    (фоновый поллер, «Проверить оплату», админ-кнопка) — иначе деньги уходили
+    бы, а период не появлялся бы никогда.
     """
-    if not await db.claim_order_for_payment(order_id, payment_id=payment_id):
+    async with _grant_lock(order_id):
         order = await db.get_order(order_id)
         if order is None:
             log.warning("Заказ #%s не найден", order_id)
             return False
-        if order["status"] != "pending":
-            log.info("Заказ #%s уже завершён (статус: %s) — повтор пропущен", order_id, order["status"])
-            return order["status"] == "paid"
-        log.warning("Не удалось захватить заказ #%s для завершения", order_id)
-        return False
-    order = await db.get_order(order_id)
-    if order is None:  # теоретически невозможно, но защищаемся
-        return False
-    user_id = int(order["user_id"])
 
-    promo_code = order["promo_code"]
-    if promo_code and not int(order["promo_reserved"] or 0):
-        # Совместимость: заказы, оформленные до перехода на резервирование,
-        # не зафиксировали использование — фиксируем по факту оплаты, если промо
-        # ещё валиден. Для новых заказов использование уже зарезервировано в
-        # момент применения (msg_promo), повторно списывать нельзя.
-        valid, reason, _promo = await db.promo_valid(promo_code, user_id)
-        if valid:
-            await db.reserve_promo(promo_code, user_id)
-        else:
-            log.warning(
-                "Заказ #%s оплачен, но промокод %s не зафиксирован (%s) — "
-                "скидка уже применена к сумме",
-                order_id, promo_code, reason,
+        retry = order["status"] == "paid"
+        if retry:
+            if not order["grant_error"]:
+                log.info("Заказ #%s уже завершён (оплачен и выдан) — повтор пропущен", order_id)
+                return True
+            log.warning("Заказ #%s оплачен, но выдача не завершена (%s) — повторяем",
+                        order_id, order["grant_error"])
+        elif not await db.claim_order_for_payment(order_id, payment_id=payment_id):
+            order = await db.get_order(order_id)
+            if order is None:
+                return False
+            if order["status"] == "pending":
+                log.warning("Не удалось захватить заказ #%s для завершения", order_id)
+                return False
+            if order["status"] != "paid":
+                log.info("Заказ #%s уже завершён (статус: %s) — повтор пропущен",
+                         order_id, order["status"])
+                return False
+            # Заказ только что переведён в paid другим вызовом; он и выдаёт подписку.
+            return True
+
+        user_id = int(order["user_id"])
+
+        promo_code = order["promo_code"]
+        if promo_code and not int(order["promo_reserved"] or 0):
+            # Совместимость: заказы, оформленные до перехода на резервирование,
+            # не зафиксировали использование — фиксируем по факту оплаты, если промо
+            # ещё валиден. Для новых заказов использование уже зарезервировано в
+            # момент применения (msg_promo), повторно списывать нельзя.
+            valid, reason, _promo = await db.promo_valid(promo_code, user_id)
+            if valid:
+                await db.reserve_promo(promo_code, user_id)
+            else:
+                log.warning(
+                    "Заказ #%s оплачен, но промокод %s не зафиксирован (%s) — "
+                    "скидка уже применена к сумме",
+                    order_id, promo_code, reason,
+                )
+
+        if not retry:
+            await db.log_payment(user_id, order["amount"], order["method"], "order", f"заказ #{order_id}")
+
+        try:
+            await grant_subscription(bot, cfg, db, user_id, order["plan_code"], notify=not silent)
+        except Exception as exc:  # noqa: BLE001 — фиксируем сбой и повторяем позже
+            await db.set_order_grant_error(order_id, f"{type(exc).__name__}: {exc}")
+            await safe_send(
+                bot, user_id,
+                "⚠️ Оплата получена, но выдать конфиг автоматически не получилось.\n"
+                "Мы повторим выдачу автоматически в течение пары минут. "
+                "Если доступ не появится — напишите в поддержку.",
             )
+            await notify_admins(
+                bot, cfg,
+                f"🚨 <b>Оплата прошла, но выдача не удалась</b>\nЗаказ #{order_id}, "
+                f"пользователь <code>{user_id}</code>\nОшибка: {esc(exc)}\n"
+                "Повторю автоматически (фоновая проверка) — или вручную: админка → «Заказы».",
+            )
+            raise
 
-    await db.log_payment(user_id, order["amount"], order["method"], "order", f"заказ #{order_id}")
-    try:
-        await grant_subscription(bot, cfg, db, user_id, order["plan_code"], notify=not silent)
-    except PanelError as exc:
-        await safe_send(
-            bot, user_id,
-            "⚠️ Оплата получена, но выдать конфиг автоматически не получилось.\n"
-            "Мы уже работаем над этим — администратор выдаст ключ вручную.",
-        )
-        await notify_admins(
-            bot, cfg,
-            f"🚨 <b>Оплата прошла, но выдача не удалась</b>\nЗаказ #{order_id}, "
-            f"пользователь <code>{user_id}</code>\nОшибка: {esc(exc)}",
-        )
-        raise
+        await db.set_order_grant_error(order_id, "")
 
-    await notify_admins(
-        bot, cfg,
-        f"💾 <b>Оплачен заказ #{order_id}</b>\n"
-        f"Пользователь: <code>{user_id}</code>\n"
-        f"Сумма: {price(order['amount'], cfg.currency)}\n"
-        f"Способ: {order['method']}\n"
-        f"Позиция: {esc(order['plan_code'])} ({order['kind']})",
-    )
-    return True
+        if retry:
+            await notify_admins(
+                bot, cfg,
+                f"♻️ <b>Повторная выдача по заказу #{order_id} прошла успешно</b>\n"
+                f"Пользователь: <code>{user_id}</code>",
+            )
+        else:
+            await notify_admins(
+                bot, cfg,
+                f"💾 <b>Оплачен заказ #{order_id}</b>\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                f"Сумма: {price(order['amount'], cfg.currency)}\n"
+                f"Способ: {order['method']}\n"
+                f"Позиция: {esc(order['plan_code'])} ({order['kind']})",
+            )
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -346,32 +408,44 @@ async def send_reminders(bot: Bot, cfg: Config, db: Database) -> None:
 async def poll_yookassa_orders(bot: Bot, cfg: Config, db: Database, client=None) -> None:
     """Резервный путь: если вебхуки недоступны, сами проверяем статус платежей ЮKassa.
 
+    Здесь же повторяются оплаченные заказы, по которым выдача подписки в прошлый
+    раз упала (``status='paid'`` + ``grant_error``): их больше не видно среди
+    ``pending``, поэтому без отдельного прохода оплата «зависла» бы навсегда.
+
     ``client`` — переиспользуемый YooKassaClient из bot.py (dp["yk"]); если не
     передан, создаётся локальный экземпляр и закрывается по завершении
     (см. docs/ARCHITECTURE.md, техдолг #3).
     """
-    if not cfg.yookassa_enabled:
+    stuck = await db.orders_needing_grant()
+    orders = await db.pending_orders(method="yookassa") if cfg.yookassa_enabled else []
+    if not orders and not stuck:
         return
-    orders = await db.pending_orders(method="yookassa")
-    if not orders:
-        return
-    own_client = client is None
+    own_client = client is None and bool(orders)
     if own_client:
         client = YooKassaClient(cfg)
     try:
         for order in orders:
-            if not order["payment_id"]:
-                continue
-            try:
-                paid = await client.is_paid(order["payment_id"], int(order["amount"]))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Проверка заказа #%s: %s", order["id"], exc)
-                continue
-            if paid:
+            # Счетов у заказа может быть несколько (история в orders.payment_ids):
+            # проверяем все, иначе оплата по «старому» счёту потеряется.
+            for pid in payment_ids_of(order):
                 try:
-                    await complete_order(bot, cfg, db, int(order["id"]), payment_id=order["payment_id"])
+                    paid = await client.is_paid(pid, int(order["amount"]))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Проверка заказа #%s (%s): %s", order["id"], pid, exc)
+                    continue
+                if not paid:
+                    continue
+                try:
+                    await complete_order(bot, cfg, db, int(order["id"]), payment_id=pid)
                 except Exception as exc:  # noqa: BLE001
                     log.error("Не удалось выдать заказ #%s: %s", order["id"], exc)
+                break
+        # Повтор выдачи по оплаченным, но не выданным заказам.
+        for order in stuck:
+            try:
+                await complete_order(bot, cfg, db, int(order["id"]), payment_id=order["payment_id"])
+            except Exception as exc:  # noqa: BLE001
+                log.error("Повтор выдачи заказа #%s не удался: %s", order["id"], exc)
     finally:
         if own_client:
             await client.close()

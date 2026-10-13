@@ -248,6 +248,20 @@ async def run() -> None:
     buyer_sub = await db.active_subscription(3001)
     check("подписка выдана по заказу", buyer_sub is not None)
 
+    # История счетов заказа: даже «затёртый» счёт должен находить заказ
+    await db.ensure_user(3002, "buyer2", "Покупатель 2")
+    order2 = await db.create_order(3002, "1m", 299, 299, None, "none")
+    await db.set_order_payment(order2, "pay-first", method="yookassa")
+    await db.set_order_payment(order2, "pay-second", method="yookassa")
+    ids = (await db.get_order(order2))["payment_ids"]
+    check("история счетов хранит оба счёта", ids == "pay-first,pay-second", str(ids))
+    found_first = await db.order_by_payment("pay-first")
+    check("заказ находится по первому (затёртому) счёту",
+          found_first is not None and int(found_first["id"]) == order2)
+    any_pending = await db.user_pending_order(3002)
+    check("незакрытый заказ находится без привязки к тарифу",
+          any_pending is not None and int(any_pending["id"]) == order2)
+
     print("\n5. Промокоды")
     await db.create_promo("vpn10", "percent", 10, max_uses=1, expires_at=None)
     ok, reason, promo = await db.promo_valid("VPN10", 3001)
@@ -427,10 +441,15 @@ async def run() -> None:
     check("ошибка API обрабатывается", await client.is_paid("pay-x", 150) is False)
 
     print("\n11. Вебхук ЮKassa: разбор уведомления")
-    from app.webhook import YOOKASSA_NETS, _ip_allowed
+    from app.webhook import YOOKASSA_NETS, _ip_allowed, _order_by_metadata
     check("IP ЮKassa из белого списка разрешён", _ip_allowed("185.71.76.10"))
     check("посторонний IP отклонён", not _ip_allowed("8.8.8.8"))
     check("диапазоны IP заданы", len(YOOKASSA_NETS) >= 6)
+    recovered = await _order_by_metadata(db, {"metadata": {"order_id": str(order2)}})
+    check("заказ восстанавливается по metadata.order_id платежа",
+          recovered is not None and int(recovered["id"]) == order2)
+    check("платёж без metadata не роняет восстановление",
+          await _order_by_metadata(db, {}) is None)
 
 
     check("профиль содержит кнопку истории заказов", "orders:history" in profile_kb().inline_keyboard.__repr__())

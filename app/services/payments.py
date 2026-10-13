@@ -98,6 +98,12 @@ class YooKassaClient:
     def payment_is_valid(payment: dict[str, Any], expected_amount: int | None = None) -> bool:
         """Проверяет объект платежа ЮKassa: ``succeeded`` + ``paid`` и (если задано) сумму.
 
+        Сумма сверяется по правилу «не меньше ожидаемой»: платёж, выставленный на
+        большую сумму (например, промокод применили уже после выставления счёта),
+        тоже считается валидным — переплату принимаем, чтобы не потерять оплату.
+        Меньшая сумма — отказ (защита от недоплаты).
+        ``expected_amount`` — в рублях.
+
         Чистая функция без сети — годится и для вебхука, и для опроса.
         """
         if payment.get("status") != "succeeded" or not payment.get("paid", False):
@@ -107,10 +113,13 @@ class YooKassaClient:
                 value = float(payment["amount"]["value"])
             except (KeyError, TypeError, ValueError):
                 return False
-            if abs(value - expected_amount) > 0.01:
-                log.warning("Сумма платежа %s (%s) не совпала с ожидаемой (%s)",
+            if value + 0.01 < expected_amount:
+                log.warning("Сумма платежа %s (%s) МЕНЬШЕ ожидаемой (%s) — платёж не зачислен",
                             payment.get("id", "?"), value, expected_amount)
                 return False
+            if value > expected_amount + 0.01:
+                log.info("Платёж %s оплачен с переплатой: %s вместо %s",
+                         payment.get("id", "?"), value, expected_amount)
         return True
 
     async def is_paid(self, payment_id: str, expected_amount: int | None = None) -> bool:

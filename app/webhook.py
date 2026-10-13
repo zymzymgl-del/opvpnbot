@@ -24,7 +24,8 @@ from app.config import Config
 from app.db import Database
 from app.logctx import log_context
 from app.services.payments import PaymentError, YooKassaClient
-from app.services.subs import complete_order
+from app.services.subs import complete_order, notify_admins
+from app.utils import esc
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,21 @@ def _client_ip(request: web.Request, trust_proxy: bool) -> str:
     return request.remote or ""
 
 
+async def _order_by_metadata(db: Database, payment: dict):
+    """Заказ по ``metadata.order_id`` платежа.
+
+    Нужен как «страховка»: если счёт по каким-то причинам перестал быть виден
+    по ``orders.payment_id``/``orders.payment_ids``, заказ всё равно находится —
+    иначе оплата потерялась бы (деньги списаны, период не выдан).
+    """
+    meta = payment.get("metadata") or {}
+    try:
+        order_id = int(meta.get("order_id"))
+    except (TypeError, ValueError):
+        return None
+    return await db.get_order(order_id)
+
+
 async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassaClient | None):
     """Поднимает aiohttp-сервер с маршрутом уведомлений. Возвращает AppRunner."""
 
@@ -95,16 +111,6 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
             # Прочие события просто подтверждаем.
             return web.Response(status=200, text="ignored")
 
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE payment_id = ? ORDER BY id DESC LIMIT 1", (payment_id,)
-        )
-        if order is None:
-            log.warning("Платёж %s не привязан ни к одному заказу", payment_id)
-            return web.Response(status=200, text="unknown payment")
-
-        if order["status"] == "paid":
-            return web.Response(status=200, text="already paid")
-
         if yk is None:
             return web.Response(status=500, text="yookassa disabled")
 
@@ -116,6 +122,38 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
         except PaymentError as exc:
             log.warning("ЮKassa недоступна при проверке %s: %s — просим повтор", payment_id, exc)
             return web.Response(status=503, text="yookassa unavailable, retry")
+
+        order = await db.order_by_payment(payment_id)
+        if order is None:
+            # Счёт мог «отвязаться» от заказа (например, его перезаписал другой
+            # счёт по тому же заказу). Ищем заказ по metadata.order_id самого
+            # платежа — иначе деньги остались бы списаны, а период не выдан.
+            order = await _order_by_metadata(db, payment)
+            if order is None:
+                log.warning("Платёж %s не привязан ни к одному заказу", payment_id)
+                return web.Response(status=200, text="unknown payment")
+            log.warning("Платёж %s не закреплён за заказом #%s — восстанавливаем связь",
+                        payment_id, order["id"])
+            await notify_admins(
+                bot, cfg,
+                f"🔎 Платёж <code>{esc(payment_id)}</code> восстановлен и привязан "
+                f"к заказу #{order['id']} (счёт был потерян — проверьте историю платежей).",
+            )
+
+        if order["status"] == "paid" and not order["grant_error"]:
+            if payment_id != (order["payment_id"] or ""):
+                # По одному заказу прошло два разных платежа — деньги списаны
+                # дважды; сообщаем админам (авто-возврата в боте нет).
+                log.warning("Заказ #%s уже оплачен; пришёл ещё платёж %s (зачёт: %s)",
+                            order["id"], payment_id, order["payment_id"])
+                await notify_admins(
+                    bot, cfg,
+                    f"⚠️ Двойная оплата заказа #{order['id']}: платёж "
+                    f"<code>{esc(payment_id)}</code> при уже оплаченном "
+                    f"<code>{esc(order['payment_id'])}</code>. Нужно вернуть или учесть вручную.",
+                )
+            # Оплата уже обработана и подписка выдана — повторять нечего.
+            return web.Response(status=200, text="already paid")
 
         if not yk.payment_is_valid(payment, int(order["amount"])):
             log.warning("Платёж %s не подтверждён через API — пропускаем", payment_id)

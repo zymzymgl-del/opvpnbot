@@ -48,7 +48,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 | ---------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `users`                      | клиенты           | telegram_id PK, trial_used, is_banned                                                                             |
 | `plans`                      | витрина           | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order                                   |
-| `orders`                     | заказы            | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id, base_amount/discount/promo_code |
+| `orders`                     | заказы            | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id/payment_ids (история счетов), base_amount/discount/promo_code |
 | `subscriptions`              | выданные ключи    | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d»)                         |
 | `promos`, `promo_uses`       | промокоды         | discount_type percent/fixed, max_uses, expires_at                                                                 |
 | `tickets`, `ticket_messages` | поддержка         | status open/closed, from_admin                                                                                    |
@@ -87,6 +87,9 @@ requirements-dev.txt       — инструменты разработки (ruff
 ## 5. Платежи
 
 - **ЮKassa** (`YooKassaClient`): REST v3, Basic Auth, идемпотентность через `Idempotence-Key`; подтверждение **только** через `GET /payments/{id}` (status=succeeded + сверка суммы ±0.01) — телу вебхука не доверяем (`app/webhook.py` + IP-allowlist сетей ЮKassa). Без вебхуков — опрос раз в 3 минуты и кнопка «Проверить оплату».
+  - **Один заказ — все его счета видны**: выставленные счета копятся в `orders.payment_ids`; вебхук, поллер и кнопка «Проверить оплату» ищут заказ по любому из них, а если счёт «отвязался» от заказа — по `metadata.order_id` платежа (с алертом админам).
+  - **Повторное нажатие «Оплатить» по уже оплаченному заказу** не выставляет новый счёт: пользователю отвечают «✅ Заказ уже оплачен». При сбое чтения счёта в ЮKassa новый счёт тоже не создаётся (просим повторить через минуту) — иначе оплата по первому счёту потерялась бы.
+  - **Один незакрытый заказ на пользователя**: пока есть неоплаченный заказ (любой тариф), кнопка «Купить» показывает именно его и не создаёт новый (`MAX_PENDING_ORDERS` остался как запасной лимит).
 - **Ручное подтверждение админом**: ожидающий заказ можно провести через `adm:order:approve` → `complete_order(payment_id="admin:{admin_id}")`.
 
 Единая точка завершения — `complete_order()`: помечает paid → выдаёт подписку (`grant_subscription`) → уведомления админам. Идемпотентна по статусу заказа.

@@ -251,15 +251,30 @@ async def cb_backup(call: CallbackQuery, db: Database, cfg: Config) -> None:
 @router.callback_query(F.data == "adm:orders")
 async def cb_orders(call: CallbackQuery, db: Database, cfg: Config) -> None:
     orders = await db.pending_orders(limit=10)
-    if not orders:
+    stuck = await db.orders_needing_grant(limit=10)
+    if not orders and not stuck:
         await call.message.edit_text("💰 <b>Заказы</b>\n\nНет заказов, ожидающих оплаты.",
                                      reply_markup=back_kb("adm:panel", "◀️ Назад"))
         await call.answer()
         return
     await call.message.edit_text(
-        f"💰 <b>Заказы в ожидании</b> ({len(orders)})\n\nВыберите заказ, чтобы подтвердить или отклонить:",
+        f"💰 <b>Заказы</b>\n\nЖдут оплаты: <b>{len(orders)}</b>, "
+        f"оплачены без выдачи: <b>{len(stuck)}</b>.\n\n"
+        "Выберите заказ: подтвердить, отклонить или выдать повторно.",
         reply_markup=back_kb("adm:panel", "◀️ Назад"),
     )
+    # Оплаченные заказы с упавшей выдачей — их нельзя терять: деньги уже получены.
+    for order in stuck:
+        user = await db.get_user(int(order["user_id"]))
+        who = user["full_name"] if user else ""
+        text = (
+            f"🚨 <b>Заказ #{order['id']} — оплачен, но не выдан</b>\n"
+            f"Пользователь: <code>{order['user_id']}</code> {esc(who)}\n"
+            f"Позиция: {esc(order['plan_code'])} ({esc(order['kind'])})\n"
+            f"Сумма: <b>{price(int(order['amount']), cfg.currency)}</b> · способ: {esc(order['method'])}\n"
+            f"Ошибка: <code>{esc(order['grant_error'])}</code>"
+        )
+        await call.message.answer(text, reply_markup=admin_order_kb(int(order["id"]), needs_regrant=True))
     for order in orders:
         user = await db.get_user(int(order["user_id"]))
         who = user["full_name"] if user else ""
@@ -283,13 +298,19 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
     if order is None:
         await call.answer("Заказ не найден.", show_alert=True)
         return
-    if order["status"] != "pending":
+    if action == "regrant":
+        # Повтор выдачи по оплаченному заказу, где выдача в прошлый раз упала.
+        if order["status"] != "paid" or not order["grant_error"]:
+            await call.answer("Повторная выдача не требуется.", show_alert=True)
+            return
+    elif order["status"] != "pending":
         await call.answer(f"Заказ уже в статусе: {order['status']}", show_alert=True)
         return
 
-    if action == "approve":
+    if action in ("approve", "regrant"):
         try:
-            await complete_order(bot, cfg, db, order_id, payment_id=f"admin:{call.from_user.id}")
+            await complete_order(bot, cfg, db, order_id,
+                                 payment_id=order["payment_id"] or f"admin:{call.from_user.id}")
         except PanelError as exc:
             await call.answer(f"Не удалось выдать ключ: {exc}", show_alert=True)
             return

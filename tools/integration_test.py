@@ -182,13 +182,25 @@ async def run() -> None:
     class FakeYooKassa:
         """Заглушка ЮKassa: платёж создаётся, проверка всегда успешна."""
 
+        def __init__(self) -> None:
+            self.created = 0
+
         async def create_payment(self, *, amount_rub, description, metadata):
-            return {"id": "pay-test", "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
+            self.created += 1
+            pid = f"pay-test-{self.created}"
+            return {"id": pid, "status": "pending",
+                    "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
+
+        async def get_payment(self, payment_id):
+            return {"id": payment_id, "status": "succeeded", "paid": True,
+                    "amount": {"value": "150.00", "currency": "RUB"},
+                    "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
 
         async def is_paid(self, payment_id, expected_amount=None):
             return True
 
-    dp = build_dispatcher(cfg, db, bot, FakeYooKassa())
+    yk = FakeYooKassa()
+    dp = build_dispatcher(cfg, db, bot, yk)
     dp["bot_username"] = "opvpnbot_test_bot"
 
     print("\n1. Пользовательский поток")
@@ -227,6 +239,15 @@ async def run() -> None:
     orders_count = int(await db.scalar("SELECT COUNT(*) FROM orders WHERE user_id = 555"))
     expect("повторный buy переиспользовал счёт (не плодит заказы)", orders_count == 1, str(orders_count))
 
+    # Другой тариф при уже созданном (неоплаченном) заказе — новый не создаём.
+    OUT.clear()
+    CALLBACK_ANSWERS.clear()
+    await dp.feed_update(bot, make_callback(555, "buy:3m", 5))
+    orders_count = int(await db.scalar("SELECT COUNT(*) FROM orders WHERE user_id = 555"))
+    expect("другой тариф не плодит второй неоплаченный заказ",
+           orders_count == 1 and any("неоплаченн" in a for a in CALLBACK_ANSWERS),
+           f"заказов={orders_count}, ответы={CALLBACK_ANSWERS}")
+
     # заказ подтверждает админ — появляется подписка (нужна для дальнейших шагов)
     OUT.clear()
     await dp.feed_update(bot, make_callback(777, f"adm:order:approve:{order_id}", 6))
@@ -249,8 +270,31 @@ async def run() -> None:
     await dp.feed_update(bot, make_callback(555, f"sub:view:{sub['id']}", 7))
     expect("карточка подписки показана", "Подписка #" in sent("message"))
 
+    print("\n1b. Оплата через ЮKassa")
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(555, "buy:1m", 12))
+    yk_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
+    await dp.feed_update(bot, make_callback(555, f"pay:yookassa:{yk_order}", 13))
+    expect("экран оплаты ЮKassa показан", "Оплата заказа" in sent("message"), sent("message")[:140])
+    await dp.feed_update(bot, make_callback(555, f"pay:check:{yk_order}", 14))
+    expect("оплата ЮKassa подтверждена и ключ выдан", "Оплата получена" in sent("message"), sent("message")[:140])
+
+    # Повторное нажатие «Оплатить» на уже оплаченном заказе: сообщаем об оплате
+    # и НЕ создаём второй счёт (иначе оплата по нему теряется).
+    created_before = yk.created
+    OUT.clear()
+    CALLBACK_ANSWERS.clear()
+    await dp.feed_update(bot, make_callback(555, f"pay:yookassa:{yk_order}", 15))
+    expect("повторная оплата оплаченного заказа: «уже оплачен», без перехода в ЮKassa",
+           any("уже оплачен" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
+    expect("повторная оплата не создаёт новый счёт", yk.created == created_before, str(yk.created))
+
     print("\n2. Промокод через бота")
     await db.create_promo("SALE25", "percent", 25, max_uses=5, expires_at=None)
+    # Оплата в 1b продлила подписку на 30 дней — снова открываем окно продления,
+    # чтобы заказы на другие тарифы создавались (иначе `_show_plans` их блокирует).
+    sub = await db.active_subscription(555)
+    await db.update_subscription(sub["id"], expires_at=to_iso(utcnow() + timedelta(days=2)))
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "buy:3m", 8))
     promo_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
@@ -284,15 +328,6 @@ async def run() -> None:
     promo_reserved = int(await db.scalar("SELECT used FROM promos WHERE code = 'SALE25'"))
     expect("повторное применение после отмены снова резервирует промокод",
            promo_reserved == 1, str(promo_reserved))
-
-    print("\n2.5 Оплата через ЮKassa")
-    OUT.clear()
-    await dp.feed_update(bot, make_callback(555, "buy:1m", 12))
-    yk_order = int(await db.scalar("SELECT id FROM orders WHERE user_id = 555 ORDER BY id DESC LIMIT 1"))
-    await dp.feed_update(bot, make_callback(555, f"pay:yookassa:{yk_order}", 13))
-    expect("экран оплаты ЮKassa показан", "Оплата заказа" in sent("message"), sent("message")[:140])
-    await dp.feed_update(bot, make_callback(555, f"pay:check:{yk_order}", 14))
-    expect("оплата ЮKassa подтверждена и ключ выдан", "Оплата получена" in sent("message"), sent("message")[:140])
 
     print("\n3. Админ-панель")
     OUT.clear()
@@ -375,7 +410,7 @@ async def run() -> None:
     OUT.clear()
     await dp.feed_update(bot, make_callback(abuse_user, "buy:3m", 30))
     expect("превышение лимита неоплаченных заказов заблокировано",
-           any("неоплаченных" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
+           any("неоплаченн" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
     abuse_orders = int(await db.scalar(
         "SELECT COUNT(*) FROM orders WHERE user_id = ?", (abuse_user,)))
     expect("новый заказ при превышении лимита не создан", abuse_orders == 5, str(abuse_orders))

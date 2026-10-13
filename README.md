@@ -38,7 +38,7 @@ docker compose logs -f
 
 ```bash
 git clone https://github.com/zymzymgl-del/opvpnbot.git && cd opvpnbot
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env && nano .env       # токен, админы, оплата, панель
 .venv/bin/python bot.py
 ```
@@ -124,7 +124,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 
 ```bash
 sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d bot.example.com     # выпустит Let's Encrypt и настроит HTTPS
+sudo certbot --nginx -d tg1.openplanetvpn.com     # выпустит Let's Encrypt и настроит HTTPS
 ```
 
 ### 2. Конфиг (вебхук + healthcheck в одном server-блоке)
@@ -134,10 +134,10 @@ sudo certbot --nginx -d bot.example.com     # выпустит Let's Encrypt и 
 ```nginx
 server {
     listen 443 ssl;
-    server_name bot.example.com;
+    server_name tg1.openplanetvpn.com;
 
-    ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/tg1.openplanetvpn.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tg1.openplanetvpn.com/privkey.pem;
 
     # ЮKassa → бот: мгновенная выдача доступа после оплаты
     location /yookassa/webhook {
@@ -169,7 +169,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ### 3. Проверка
 
 ```bash
-curl -s https://bot.example.com/healthz        # → {"ok": true}
+curl -s https://tg1.openplanetvpn.com/healthz        # → {"ok": true}
 sudo tail -f /var/log/nginx/error.log
 ```
 
@@ -177,12 +177,12 @@ sudo tail -f /var/log/nginx/error.log
 
 ```env
 WEBHOOK_ENABLED=true
-WEBHOOK_PUBLIC_URL=https://bot.example.com/yookassa/webhook
+WEBHOOK_PUBLIC_URL=https://tg1.openplanetvpn.com/yookassa/webhook
 WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, иначе вебхуки получат 403
 ```
 
 Тот же адрес укажите в кабинете ЮKassa (**Интеграция → HTTP-уведомления**, событие
-`payment.succeeded`), а `https://bot.example.com/healthz` — во внешнем мониторе
+`payment.succeeded`), а `https://tg1.openplanetvpn.com/healthz` — во внешнем мониторе
 (healthchecks.io / UptimeRobot / Better Stack). После правок: `sudo systemctl restart opvpnbot`.
 
 ---
@@ -200,7 +200,7 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
 | `PAYMENT_METHODS`                                  | `yookassa`                                                                                   |
 | `TRIAL_ENABLED`, `TRIAL_DAYS`                      | Пробный период                                                                               |
-| `MAX_PENDING_ORDERS`                               | Максимум неоплаченных заказов на пользователя (0 — без лимита)                               |
+| `MAX_PENDING_ORDERS`                               | Лимит неоплаченных заказов на пользователя (запасной предохранитель; пока есть хоть один незакрытый заказ, новый не создаётся) |
 | `REQUIRED_CHANNELS`                                | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала)                         |
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |
