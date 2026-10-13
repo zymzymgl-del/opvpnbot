@@ -168,6 +168,7 @@ class Config:
     auto_disable_expired: bool
     notify_days_before: tuple[int, ...]
     orders_ttl_hours: int
+    invoice_ttl_minutes: int
     backup_interval_minutes: int
     backup_keep: int
     throttling_rate: float
@@ -234,6 +235,7 @@ def load_config() -> Config:
         auto_disable_expired=_bool("AUTO_DISABLE_EXPIRED", True),
         notify_days_before=tuple(sorted({d for d in _ints("NOTIFY_DAYS_BEFORE", (3, 1)) if d > 0}, reverse=True)),
         orders_ttl_hours=_int("ORDERS_TTL_HOURS", 48),
+        invoice_ttl_minutes=_int("INVOICE_TTL_MINUTES", 120),
         backup_interval_minutes=_int("BACKUP_INTERVAL_MINUTES", 60),
         backup_keep=_int("BACKUP_KEEP", 48),
         throttling_rate=_float("THROTTLING_RATE", 0.6),

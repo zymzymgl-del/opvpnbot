@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status          TEXT NOT NULL DEFAULT 'pending',
     payment_id      TEXT,
     payment_ids     TEXT NOT NULL DEFAULT '',
+    payment_url     TEXT,
     created_at      TEXT NOT NULL,
     paid_at         TEXT,
     grant_error     TEXT NOT NULL DEFAULT '',
@@ -221,9 +222,9 @@ class Database:
         """Идемпотентные миграции для уже существующих БД.
 
         Новые БД получают актуальную схему из ``SCHEMA``; старые догоняются
-        здесь: колонки ``orders.promo_reserved``, ``orders.grant_error`` и
-        ``orders.payment_ids``, а также уникальность пары
-        ``promo_uses(code, user_id)`` (перед созданием
+        здесь: колонки ``orders.promo_reserved``, ``orders.grant_error``,
+        ``orders.payment_ids`` и ``orders.payment_url``, а также уникальность
+        пары ``promo_uses(code, user_id)`` (перед созданием
         индекса дубликаты сводятся к самой ранней записи).
         """
         async with self._lock:
@@ -241,6 +242,8 @@ class Database:
                 await self.conn.execute(
                     "ALTER TABLE orders ADD COLUMN payment_ids TEXT NOT NULL DEFAULT ''"
                 )
+            if "payment_url" not in columns:
+                await self.conn.execute("ALTER TABLE orders ADD COLUMN payment_url TEXT")
             await self.conn.execute(
                 "DELETE FROM promo_uses WHERE id NOT IN "
                 "(SELECT MIN(id) FROM promo_uses GROUP BY code, user_id)"
@@ -453,6 +456,39 @@ class Database:
         return await self.fetchall(
             "SELECT * FROM orders WHERE status = 'paid' AND grant_error <> '' ORDER BY id LIMIT ?",
             (limit,),
+        )
+
+    async def claim_order_invoice(self, order_id: int, payment_id: str, confirmation_url: str,
+                                  method: str = "yookassa") -> bool:
+        """Атомарно привязывает счёт ЮKassa к неоплаченному заказу («занять счёт»).
+
+        Возвращает ``True``, если именно этот вызов записал платёж, и ``False``,
+        если у заказа уже есть свой платёж (или заказ завершён). Пара
+        ``payment_id``/``confirmation_url`` сохраняется вместе с id платежа,
+        поэтому повторное нажатие «Заплатить» по тому же заказу получает ту же
+        ссылку, а не новый счёт: один заказ — один платёж.
+        """
+        async with self._lock:
+            cur = await self.conn.execute(
+                "UPDATE orders SET method = ?, payment_id = ?, payment_url = ? "
+                "WHERE id = ? AND status = 'pending' AND (payment_id IS NULL OR payment_id = '')",
+                (method, payment_id, confirmation_url, order_id),
+            )
+            claimed = cur.rowcount > 0
+            await self.conn.commit()
+            return claimed
+
+    async def release_order_invoice(self, order_id: int) -> None:
+        """Снимает занятый счёт с заказа (если платёж не подтвердился).
+
+        После этого пользователь может запросить новую ссылку на оплату;
+        старый непроведённый счёт остаётся в ЮKassa и просто истекает по
+        ``ttl``. Идемпотентен: не трогает оплаченные заказы.
+        """
+        await self.execute(
+            "UPDATE orders SET payment_id = NULL, payment_url = NULL "
+            "WHERE id = ? AND status = 'pending'",
+            (order_id,),
         )
 
     async def set_order_payment(self, order_id: int, payment_id: str, method: str = "yookassa") -> None:
