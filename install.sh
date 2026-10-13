@@ -627,8 +627,8 @@ verify_deploy() {
   fi
   have curl || return 0
   info "Проверяю ${url} ..."
-  sleep 2
-  if curl -fsS --max-time 10 "$url"; then
+  # Бот стартует ~5-10 с: ретраим не только на 5xx, но и на "connection refused".
+  if curl -fsS --max-time 10 --retry 10 --retry-delay 2 --retry-connrefused "$url"; then
     printf '\n'
     ok "Бот отвечает на /healthz."
   else
