@@ -277,7 +277,8 @@ async def run() -> None:
 
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, "menu:keys", 18))
-    expect("список ключей показан", "Мои подписки" in sent("message"), sent("message")[:80])
+    expect("единственная подписка открывается сразу карточкой",
+           "Подписка #" in sent("message"), sent("message")[:80])
     OUT.clear()
     await dp.feed_update(bot, make_callback(555, f"sub:view:{sub['id']}", 7))
     expect("карточка подписки показана", "Подписка #" in sent("message"))

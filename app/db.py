@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 import aiosqlite
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -223,9 +226,10 @@ class Database:
 
         Новые БД получают актуальную схему из ``SCHEMA``; старые догоняются
         здесь: колонки ``orders.promo_reserved``, ``orders.grant_error``,
-        ``orders.payment_ids`` и ``orders.payment_url``, а также уникальность
-        пары ``promo_uses(code, user_id)`` (перед созданием
-        индекса дубликаты сводятся к самой ранней записи).
+        ``orders.payment_ids`` и ``orders.payment_url``, уникальность пары
+        ``promo_uses(code, user_id)`` и инвариант «одна активная подписка на
+        пользователя» (``idx_subs_one_active``). Перед созданием каждого
+        уникального индекса дубликаты сводятся вручную.
         """
         async with self._lock:
             cur = await self.conn.execute("PRAGMA table_info(orders)")
@@ -251,6 +255,28 @@ class Database:
             await self.conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_uses_code_user "
                 "ON promo_uses(code, user_id)"
+            )
+            # Инвариант «одна активная подписка на пользователя». Сначала сводим
+            # возможные дубликаты (у пользователя остаётся та подписка, что
+            # истекает позже), только потом создаём индекс — иначе на БД с
+            # дубликатами его создание упало бы и бот не запустился.
+            cur = await self.conn.execute(
+                "UPDATE subscriptions SET status = 'expired' "
+                "WHERE status = 'active' AND id NOT IN ("
+                "  SELECT id FROM ("
+                "    SELECT id, ROW_NUMBER() OVER ("
+                "      PARTITION BY user_id ORDER BY expires_at DESC, id DESC) AS rn "
+                "    FROM subscriptions WHERE status = 'active'"
+                "  ) WHERE rn = 1)"
+            )
+            if cur.rowcount:
+                log.warning(
+                    "Миграция: снят статус 'active' у %s дублирующихся подписок",
+                    cur.rowcount,
+                )
+            await self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_subs_one_active "
+                "ON subscriptions(user_id) WHERE status = 'active'"
             )
             await self.conn.commit()
 
@@ -655,12 +681,28 @@ class Database:
     async def create_subscription(self, user_id: int, plan_code: str, vpn_key: str, sub_url: str | None,
                                   panel: str, panel_username: str, devices: int, traffic_gb: int,
                                   expires_at: datetime) -> int:
-        return await self.execute(
-            "INSERT INTO subscriptions(user_id, plan_code, vpn_key, sub_url, panel, panel_username, devices, "
-            "traffic_gb, expires_at, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
-            (user_id, plan_code, vpn_key, sub_url, panel, panel_username, devices, traffic_gb,
-             to_iso(expires_at), to_iso(utcnow())),
-        )
+        """Создаёт новую активную подписку и возвращает её id.
+
+        Возвращает 0, если у пользователя УЖЕ есть активная подписка: уникальный
+        индекс ``idx_subs_one_active`` делает вторую активную подписку
+        невозможной (инвариант «одна подписка на клиента»). Вызывающий код при 0
+        обязан перевыдать подписку в существующую строку, а не считать это ошибкой.
+        """
+        params = (user_id, plan_code, vpn_key, sub_url, panel, panel_username, devices, traffic_gb,
+                  to_iso(expires_at), to_iso(utcnow()))
+        async with self._lock:
+            try:
+                cur = await self.conn.execute(
+                    "INSERT INTO subscriptions(user_id, plan_code, vpn_key, sub_url, panel, "
+                    "panel_username, devices, traffic_gb, expires_at, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+                    params,
+                )
+            except aiosqlite.IntegrityError:
+                await self.conn.rollback()
+                return 0
+            await self.conn.commit()
+            return cur.lastrowid or 0
 
     async def claim_subscription(self, user_id: int, plan_code: str, vpn_key: str, sub_url: str | None,
                                  panel: str, panel_username: str, devices: int, traffic_gb: int,
@@ -673,14 +715,19 @@ class Database:
         """
         now = to_iso(utcnow())
         async with self._lock:
-            cur = await self.conn.execute(
-                "INSERT INTO subscriptions(user_id, plan_code, vpn_key, sub_url, panel, panel_username, "
-                "devices, traffic_gb, expires_at, status, created_at) "
-                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ? "
-                "WHERE NOT EXISTS (SELECT 1 FROM subscriptions WHERE panel = ? AND panel_username = ?)",
-                (user_id, plan_code, vpn_key, sub_url, panel, panel_username, devices, traffic_gb,
-                 to_iso(expires_at), now, panel, panel_username),
-            )
+            try:
+                cur = await self.conn.execute(
+                    "INSERT INTO subscriptions(user_id, plan_code, vpn_key, sub_url, panel, panel_username, "
+                    "devices, traffic_gb, expires_at, status, created_at) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ? "
+                    "WHERE NOT EXISTS (SELECT 1 FROM subscriptions WHERE panel = ? AND panel_username = ?)",
+                    (user_id, plan_code, vpn_key, sub_url, panel, panel_username, devices, traffic_gb,
+                     to_iso(expires_at), now, panel, panel_username),
+                )
+            except aiosqlite.IntegrityError:
+                # Гонка: у пользователя параллельно появилась активная подписка.
+                await self.conn.rollback()
+                return 0
             inserted = cur.rowcount > 0
             await self.conn.commit()
             return (cur.lastrowid or 0) if inserted else 0

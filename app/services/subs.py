@@ -67,18 +67,22 @@ def renewal_available(existing, cfg: Config) -> bool:
 
 
 async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: int, sub_row,
-                                 *, with_qr: bool = False) -> None:
+                                 *, with_qr: bool = False,
+                                 header: str = "🎉 <b>VPN готов!</b>") -> None:
     """Отправляет пользователю карточку подписки (конфиг + кнопки QR/инструкции).
 
     ``with_qr=True`` дополнительно отправляет QR-код отдельным сообщением —
     нужно только в сценарии привязки клиента панели (claims), где QR был в ссылке,
     которую пользователь отсканировал. При обычной выдаче/продлении QR не шлём:
     он доступен кнопкой «📷 QR-код».
+
+    ``header`` — заголовок карточки: при перевыдаче сломанного клиента это
+    «♻️ Подписка перевыдана», чтобы пользователь понял, что конфиг заменился.
     """
     sub_url = sub_row["sub_url"] if "sub_url" in sub_row.keys() else None
     link = sub_url or (sub_row["vpn_key"] or "")
     text = (
-        "🎉 <b>VPN готов!</b>\n\n"
+        f"{header}\n\n"
         f"Тариф: <b>{esc(sub_row['plan_code'])}</b>\n"
         f"Действует до: <b>{fmt_dt(sub_row['expires_at'])}</b> "
         f"(осталось {human_left(sub_row['expires_at'])})\n"
@@ -101,12 +105,30 @@ async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: i
             )
 
 
+async def _apply_reissue(db: Database, sub_id: int, issued, *, shown_plan: str, devices: int,
+                        traffic_gb: int, expires_at: datetime) -> None:
+    """Перевыдача: обновляет СУЩЕСТВУЮЩУЮ строку подписки данными нового клиента.
+
+    Нужна, когда продлить/возобновить старый клиент панели не получилось
+    (он удалён или сломан): бот выпускает нового клиента, но пишет его в ТУ ЖЕ
+    строку ``subscriptions``. Так у пользователя не появляется второй подписки.
+    """
+    await db.update_subscription(
+        sub_id,
+        vpn_key=issued.vpn_key, sub_url=issued.sub_url,
+        panel_username=issued.panel_username,
+        expires_at=to_iso(expires_at), status="active", notified="",
+        devices=devices, traffic_gb=traffic_gb, plan_code=shown_plan,
+    )
+
+
 async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, plan_code: str,
                              *, days: Optional[int] = None, devices: Optional[int] = None,
                              traffic_gb: Optional[int] = None, notify: bool = True,
                              quiet_admin: bool = False):
     """Выдаёт доступ: продлевает активную подписку, возобновляет истёкшую тем же
-    клиентом панели либо создаёт новую, если переиспользовать клиента нельзя."""
+    клиентом панели, а если клиента продлить нельзя — перевыдаёт его в ту же
+    строку. Второй подписки у пользователя не появляется никогда."""
     plan = await db.get_plan(plan_code)
     if plan is None and plan_code != "trial":
         raise PanelError(f"Тариф {plan_code} не найден.")
@@ -126,17 +148,19 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
     active = await db.active_subscription(user_id)
 
     # Кого продлевать/возобновлять:
-    #  * активную подписку той же панели — обычное продление;
+    #  * активную подписку — обычное продление;
     #  * если активной нет — последнего истёкшего клиента той же панели, чтобы
     #    вернуть пользователю ТОТ ЖЕ конфиг, а не плодить нового клиента в панели.
-    # Новую подписку создаём, только если активна подписка другой панели либо
-    # клиента не удалось продлить (например, он удалён в панели).
-    reuse = None
-    if active is not None:
-        if active["panel"] == panel.name:
-            reuse = active
-    else:
+    # Второй подписки у пользователя быть не должно (инвариант «одна подписка»).
+    reuse = active
+    if reuse is None:
         reuse = await db.latest_subscription(user_id, panel.name, status="expired")
+    elif reuse["panel"] != panel.name:
+        # Активна подписка ДРУГОЙ панели: вторую активную создавать нельзя, а
+        # продлить чужого клиента текущей панелью невозможно.
+        raise PanelError(
+            f"Активна подписка другой панели ({reuse['panel']}) — нужно ручное вмешательство."
+        )
 
     if reuse is not None:
         reactivating = reuse["status"] != "active"
@@ -155,14 +179,14 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
             panel_username=reuse["panel_username"] or "", days=days,
             devices=new_devices, traffic_gb=merged_traffic,
         )
-        if extended and reactivating:
-            # Клиент был выключен при истечении — включаем обратно (best-effort:
-            # некоторые панели уже включают его внутри extend_client).
-            try:
-                await panel.set_enabled(panel_username=reuse["panel_username"] or "", enabled=True)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось включить клиента %s: %s", reuse["panel_username"], exc)
         if extended:
+            if reactivating:
+                # Клиент был выключен при истечении — включаем обратно (best-effort:
+                # некоторые панели уже включают его внутри extend_client).
+                try:
+                    await panel.set_enabled(panel_username=reuse["panel_username"] or "", enabled=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Не удалось включить клиента %s: %s", reuse["panel_username"], exc)
             await db.update_subscription(
                 reuse["id"],
                 expires_at=to_iso(new_expires),
@@ -197,11 +221,41 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
                     f"Тариф: {esc(plan_code)}\nСрок: +{days} дн. → до {fmt_dt(new_expires)}",
                 )
             return refreshed
-        log.warning(
-            "Клиента %s (%s) продлить не удалось — создаём нового",
-            reuse["panel_username"], reuse["panel"],
-        )
 
+        # Продлить/возобновить существующего клиента не удалось — он удалён или
+        # сломан в панели. ПЕРЕВЫДАЁМ подписку: выпускаем нового клиента, но
+        # пишем его в ТУ ЖЕ строку, чтобы у пользователя не появилось второй подписки.
+        log.warning(
+            "Клиента %s (%s) продлить не удалось — перевыдаём подписку #%s",
+            reuse["panel_username"], reuse["panel"], reuse["id"],
+        )
+        issued = await panel.create_client(
+            user_id=user_id, days=days, devices=new_devices,
+            traffic_gb=new_traffic, plan_code=plan_code,
+        )
+        await _apply_reissue(
+            db, int(reuse["id"]), issued, shown_plan=shown_plan,
+            devices=new_devices, traffic_gb=new_traffic, expires_at=new_expires,
+        )
+        refreshed = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(reuse["id"]),))
+        if notify:
+            await send_subscription_card(
+                bot, cfg, db, user_id, refreshed,
+                header=(
+                    "♻️ <b>Подписка перевыдана</b>\n"
+                    "Старый конфиг в панели оказался недоступен — мы выпустили новый. "
+                    "Переимпортируйте ссылку или QR-код."
+                ),
+            )
+        if not quiet_admin:
+            await notify_admins(
+                bot, cfg,
+                f"♻️ <b>Перевыдача подписки</b>\nПользователь: <code>{user_id}</code>\n"
+                f"Тариф: {esc(shown_plan)}\nСрок: +{days} дн. → до {fmt_dt(new_expires)}",
+            )
+        return refreshed
+
+    # Первая подписка пользователя.
     issued = await panel.create_client(
         user_id=user_id, days=days, devices=devices or 1,
         traffic_gb=traffic_gb or 0, plan_code=plan_code,
@@ -212,6 +266,18 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
         panel=issued.panel, panel_username=issued.panel_username, devices=devices or 1,
         traffic_gb=traffic_gb or 0, expires_at=expires_at,
     )
+    if not sub_id:
+        # Гонка: активная подписка появилась параллельно — перевыдаём в неё,
+        # второй строки не создаём.
+        existing = await db.active_subscription(user_id)
+        if existing is None:
+            raise PanelError("Не удалось создать подписку — попробуйте ещё раз.")
+        log.warning("Активная подписка появилась параллельно — перевыдаю в #%s", existing["id"])
+        await _apply_reissue(
+            db, int(existing["id"]), issued, shown_plan=plan_code,
+            devices=devices or 1, traffic_gb=traffic_gb or 0, expires_at=expires_at,
+        )
+        sub_id = int(existing["id"])
     row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
     if notify:
         # Только карточка подписки: QR — по кнопке, главное меню — по кнопке «📋 Все подписки».

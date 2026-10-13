@@ -110,7 +110,7 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
     if support_username:
         builder.button(text="🆘 Не работает", url=f"https://t.me/{support_username}")
-    builder.button(text="📋 Все подписки", callback_data="menu:keys")
+    builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
     return builder.as_markup()
 

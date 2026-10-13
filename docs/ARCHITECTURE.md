@@ -49,7 +49,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 | `users`                      | клиенты           | telegram_id PK, trial_used, is_banned                                                                             |
 | `plans`                      | витрина           | code PK, price, days, traffic_gb (0 = безлимит), devices, is_active, sort_order                                   |
 | `orders`                     | заказы            | kind = subscription, status ∈ pending/paid/canceled/refunded, method, payment_id/payment_ids (история счетов), base_amount/discount/promo_code |
-| `subscriptions`              | выданные ключи    | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d»)                         |
+| `subscriptions`              | выданные ключи    | vpn_key, sub_url, panel, panel_username, expires_at (ISO UTC), status, notified («3d,1d»); активная — ровно одна на пользователя (`idx_subs_one_active`) |
 | `promos`, `promo_uses`       | промокоды         | discount_type percent/fixed, max_uses, expires_at                                                                 |
 | `tickets`, `ticket_messages` | поддержка         | status open/closed, from_admin                                                                                    |
 | `payments_log`               | история денег     | user_id, amount, method, kind, note                                                                               |
@@ -77,7 +77,18 @@ requirements-dev.txt       — инструменты разработки (ruff
    же клиентом: `extend_client` + `set_enabled(True)`. Срок считается от
    `max(прошлое окончание, сейчас)`, чтобы простой не «съедал» новый период.
 3. **Клиента продлить не удалось** (например, удалён в панели: `extend_client` вернул
-   `False`) → создаётся новый клиент (`create_client`).
+   `False`) → **перевыдача**: создаётся новый клиент (`create_client`), но его данные
+   пишутся в **ту же строку** `subscriptions` (`_apply_reissue`) — второй подписки у
+   пользователя не появляется, а конфиг заменяется рабочим. Пользователю уходит
+   карточка с заголовком «♻️ Подписка перевыдана» (конфиг сменился — нужно
+   переимпортировать ссылку/QR).
+
+**Инвариант «одна активная подписка на клиента»** закреплён и на уровне БД: частичный
+уникальный индекс `idx_subs_one_active ON subscriptions(user_id) WHERE status='active'`.
+Перед его созданием `_migrate()` сводит возможные дубликаты (оставляя ту подписку, что
+истекает позже). `db.create_subscription()` при конфликте возвращает `0`, и выдача
+переходит в перевыдачу в существующую строку. Продление, когда активна подписка
+другой панели, запрещено (защитный `PanelError`).
 
 Так повторная покупка после истечения возвращает пользователю **тот же конфиг**,
 а не плодит нового клиента в панели. Статусы подписки:
@@ -98,6 +109,7 @@ requirements-dev.txt       — инструменты разработки (ruff
 
 - Пользователь: `PromoStates.enter`, `TicketStates.subject/message/reply`.
 - Режим одного окна: подсказки и результаты ввода правят то же сообщение — его id хранится в FSM-данных под ключом `ui_window_id` (хелперы `_prompt_window`/`_apply_window` в `app/handlers/user.py`). Сейчас покрыты пользовательские потоки (промокод, поддержка); админские мастера пока шлют новые сообщения.
+- Экраны подписки: у клиента активная подписка ровно одна, поэтому «🔑 Моя подписка» при единственной записи открывает карточку сразу (`_render_sub_card`), а список (`keys_kb`) показывается только если записей больше одной.
 - Админ: `AdminStates.*` (мастер промокода из 5 шагов, рассылка, поиск/сообщение/выдача пользователя, ответ в тикет, редактирование тарифа, дни триала, привязка клиента панели).
 
 ## 7. Известные технические долги (зафиксированы при реконструкции)

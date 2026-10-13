@@ -758,7 +758,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
 # Мои ключи
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "menu:keys")
-async def cb_keys(call: CallbackQuery, db: Database) -> None:
+async def cb_keys(call: CallbackQuery, db: Database, cfg: Config) -> None:
     subs = await db.user_subscriptions(call.from_user.id)
     if not subs:
         await _edit_or_answer(
@@ -771,18 +771,23 @@ async def cb_keys(call: CallbackQuery, db: Database) -> None:
         )
         await call.answer()
         return
+    if len(subs) == 1:
+        # У пользователя ровно одна подписка (обычный случай) — список из одной
+        # строки был бы лишним шагом, открываем карточку сразу.
+        await _render_sub_card(call, db, cfg, int(subs[0]["id"]))
+        await call.answer()
+        return
     text = "🔑 <b>Мои подписки</b>\n\nВыберите подписку, чтобы посмотреть конфиг, QR-код и инструкцию."
     await _edit_or_answer(call, text, keys_kb(subs))
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("sub:view:"))
-async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
-    sub_id = int(call.data.rsplit(":", 1)[1])
+async def _render_sub_card(call: CallbackQuery, db: Database, cfg: Config, sub_id: int) -> bool:
+    """Показывает карточку подписки. False — подписка не найдена или чужая."""
     sub = await db.get_subscription(sub_id)
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
-        return
+        return False
     link = sub["sub_url"] or sub["vpn_key"] or ""
     text = (
         f"🔑 <b>Подписка #{sub_id}</b>\n\n"
@@ -796,6 +801,12 @@ async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
     )
     markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "", cfg.support_username)
     await _edit_or_answer(call, text, markup)
+    return True
+
+
+@router.callback_query(F.data.startswith("sub:view:"))
+async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    await _render_sub_card(call, db, cfg, int(call.data.rsplit(":", 1)[1]))
     await call.answer()
 
 
@@ -817,7 +828,7 @@ def _sub_back_kb(sub_id: int) -> InlineKeyboardMarkup:
     """Клавиатура возврата для подэкранов подписки (как у «Как подключиться»)."""
     builder = InlineKeyboardBuilder()
     builder.button(text="◀️ Назад к подписке", callback_data=f"sub:view:{sub_id}")
-    builder.button(text="📋 Все подписки", callback_data="menu:keys")
+    builder.button(text="🏠 В меню", callback_data="menu:main")
     builder.adjust(1)
     return builder.as_markup()
 

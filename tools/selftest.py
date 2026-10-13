@@ -135,6 +135,7 @@ class FakePanel(BasePanel):
 
     def __init__(self) -> None:
         self.counter = 0
+        self.fail_extend = False
 
     async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
                             plan_code: str) -> IssuedKey:
@@ -148,7 +149,7 @@ class FakePanel(BasePanel):
 
     async def extend_client(self, *, panel_username: str, days: int,
                             devices: int | None = None, traffic_gb: int | None = None) -> bool:
-        return True
+        return not self.fail_extend
 
     async def set_enabled(self, *, panel_username: str, enabled: bool) -> bool:
         return True
@@ -229,6 +230,27 @@ async def run() -> None:
           (from_iso(revived["expires_at"]) - utcnow()).days >= 88,
           str((from_iso(revived["expires_at"]) - utcnow()).days))
     check("новых подписок не появилось", len(await db.user_subscriptions(1001)) == 1)
+
+    print("\n2c. Перевыдача вместо второй подписки (клиент панели сломан)")
+    await db.ensure_user(1004, "dave", "Дейв")
+    first = await grant_subscription(bot, cfg, db, 1004, "1m")
+    fake_panel.fail_extend = True
+    reissued = await grant_subscription(bot, cfg, db, 1004, "1m")
+    fake_panel.fail_extend = False
+    user_subs = await db.user_subscriptions(1004)
+    check("перевыдача: вторая подписка не создана", len(user_subs) == 1, str(len(user_subs)))
+    check("перевыдача обновила ту же строку", int(reissued["id"]) == int(first["id"]),
+          f"{reissued['id']} != {first['id']}")
+    check("перевыдача: активная ровно одна",
+          await db.scalar("SELECT COUNT(*) FROM subscriptions WHERE user_id = 1004 AND status = 'active'") == 1)
+    check("перевыдача выдала новый конфиг", reissued["vpn_key"] != first["vpn_key"], reissued["vpn_key"] or "")
+    check("перевыдача: подписка активна", reissued["status"] == "active", str(reissued["status"]))
+    check("перевыдача: пользователю сказали о перевыдаче", "перевыдан" in bot.all_text_for(1004))
+    dup = await db.create_subscription(
+        user_id=1004, plan_code="1m", vpn_key="vless://dup", sub_url=None, panel="xui",
+        panel_username="dup", devices=1, traffic_gb=0, expires_at=utcnow() + timedelta(days=30),
+    )
+    check("вторую активную подписку блокирует БД", dup == 0, str(dup))
 
     print("\n3. Пробный период")
     trial = await grant_subscription(bot, cfg, db, 1002, "trial")
