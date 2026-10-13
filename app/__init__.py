@@ -51,7 +51,7 @@ def _resolve_build() -> str:
     на импорте модуля, поэтому её надо пробросить ДО запуска процесса
     (в systemd это ``EnvironmentFile``, в Docker — ``ENV``).
     """
-    explicit = os.getenv("APP_VERSION", "").strip()
+    explicit = os.getenv("APP_VERSION", "").strip().lstrip("v")
     if explicit:
         return explicit
     described = _git_describe()
