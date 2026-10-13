@@ -167,7 +167,7 @@ async def main() -> None:
     await set_commands(bot)
     await notify_admins(
         bot, cfg,
-        f"🚀 <b>Бот запущен</b> (v{__version__})\nПанель: <code>{cfg.panel}</code>\n"
+        f"🚀 <b>Бот запущен</b> (v{__version__})\n\n"
         f"Оплата: <code>{', '.join(cfg.payment_methods)}</code>",
     )
 

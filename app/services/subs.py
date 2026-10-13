@@ -286,7 +286,7 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
         await notify_admins(
             bot, cfg,
             f"🆕 Новая подписка\nПользователь: <code>{user_id}</code>\nТариф: {esc(plan_code)}\n"
-            f"Срок: {days} дн. (до {fmt_dt(expires_at)})\nПанель: {issued.panel}",
+            f"Срок: {days} дн. (до {fmt_dt(expires_at)})\n",
         )
     return row
 

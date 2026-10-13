@@ -260,8 +260,8 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
     text = (
         "🛒 <b>Выберите тариф</b>\n\n"
         f"Оплата: {_methods_line(cfg)}.\n"
-        f"Пробный период: {'да, ' + str(rt.trial_days) + ' дн.' if rt.trial_enabled else 'нет'}\n\n"
-        "Чем длиннее тариф — тем выгоднее цена за месяц."
+        f"Пробный период: {'да, ' + str(rt.trial_days) + ' дн.' if rt.trial_enabled else 'нет'}\n\n\n"
+
     )
     markup = plans_kb(plans, cfg.currency)
     if isinstance(target, CallbackQuery):
@@ -788,7 +788,6 @@ async def _render_sub_card(call: CallbackQuery, db: Database, cfg: Config, sub_i
     if sub is None or int(sub["user_id"]) != call.from_user.id:
         await call.answer("Подписка не найдена.", show_alert=True)
         return False
-    link = sub["sub_url"] or sub["vpn_key"] or ""
     text = (
         f"🔑 <b>Подписка #{sub_id}</b>\n\n"
         f"Тариф: <b>{esc(sub['plan_code'])}</b>\n"
@@ -796,8 +795,7 @@ async def _render_sub_card(call: CallbackQuery, db: Database, cfg: Config, sub_i
         f"Действует до: <b>{fmt_dt(sub['expires_at'])}</b> (осталось {human_left(sub['expires_at'])})\n"
         f"Устройств: {sub['devices']}, трафик: "
         f"{'безлимит' if not sub['traffic_gb'] else str(sub['traffic_gb']) + ' ГБ'}\n"
-        f"Панель: {sub['panel']}\n\n"
-        f"🔗 <code>{esc(link)}</code>"
+
     )
     markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "", cfg.support_username)
     await _edit_or_answer(call, text, markup)
