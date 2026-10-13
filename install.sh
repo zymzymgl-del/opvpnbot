@@ -44,6 +44,8 @@ WITH_FIREWALL="${WITH_FIREWALL:-true}"   # "true"/"false" — ufw с уже от
 WEBHOOK_PATH="${WEBHOOK_PATH:-/yookassa/webhook}"
 WEBHOOK_PORT="${WEBHOOK_PORT:-8080}"
 HEALTH_PORT="${HEALTH_PORT:-8081}"
+#: Доп. порты для ufw (через запятую), например порт VPN-inbound: --allow-port 8443
+EXTRA_PORTS="${EXTRA_PORTS:-}"
 
 c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_blu=$'\033[34m'
 info() { printf '%s\n' "${c_blu}[*]${c_reset} $*"; }
@@ -72,6 +74,9 @@ OPVPN — установщик
   --with-nginx        включить настройку nginx (домен спросит/возьмёт из окружения)
   --no-nginx          не трогать nginx
   --no-firewall       не включать ufw (по умолчанию включается)
+  --allow-port <п>    дополнительно открыть порт в ufw (можно через запятую;
+                      например порт VPN-inbound). Порты панели/подписки
+                      из XUI_URL и XUI_SUB_BASE открываются автоматически
   -h, --help          эта справка
 
 Примеры:
@@ -112,6 +117,12 @@ while [ $# -gt 0 ]; do
     --with-nginx)  WITH_NGINX=1 ;;
     --no-nginx)    WITH_NGINX=0 ;;
     --no-firewall) WITH_FIREWALL="false" ;;
+    --allow-port)
+      shift
+      [ $# -gt 0 ] || die "После --allow-port нужен порт."
+      EXTRA_PORTS="${EXTRA_PORTS}${EXTRA_PORTS:+,}$1"
+      ;;
+    --allow-port=*) EXTRA_PORTS="${EXTRA_PORTS}${EXTRA_PORTS:+,}${1#*=}" ;;
     -h|--help)     usage; exit 0 ;;
     *)             die "Неизвестный аргумент: $1 (см. --help)" ;;
   esac
@@ -212,6 +223,13 @@ set_env() {
 put_env() {
   # put_env FILE KEY VALUE — как set_env, но пропускает пустые значения
   if [ -n "${3-}" ]; then set_env "$1" "$2" "$3"; fi
+}
+
+env_value() {
+  # env_value KEY — значение ключа из .env (пусто, если файла/ключа нет).
+  local key="$1" file="$INSTALL_DIR/.env"
+  [ -f "$file" ] || return 0
+  awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
 collect_config() {
@@ -412,12 +430,64 @@ pin_version() {
 }
 
 # --- nginx / firewall / проверка --------------------------------------------
+apt_locked() {
+  # Занят ли dpkg/apt (например, идёт unattended-upgrades).
+  have pgrep || return 1
+  pgrep -x dpkg >/dev/null 2>&1 \
+    || pgrep -x apt-get >/dev/null 2>&1 \
+    || pgrep -x apt >/dev/null 2>&1 \
+    || pgrep -f 'unattended-upgr' >/dev/null 2>&1
+}
+
+wait_apt_lock() {
+  # apt/dpkg держат лок: ждём освобождения (до 3 минут) вместо падения.
+  local waited=0
+  while apt_locked; do
+    if [ "$waited" -eq 0 ]; then
+      info "apt/dpkg занят (идёт unattended-upgrades?) — жду освобождения..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+    if [ "$waited" -ge 180 ]; then
+      warn "apt/dpkg не освободился за 3 минуты."
+      return 1
+    fi
+  done
+  return 0
+}
+
 apt_install() {
   # apt_install pkg... — ставит пакеты из репозиториев дистрибутива.
   [ "$#" -gt 0 ] || return 0
   have apt-get || die "Автонастройка поддерживается только на Debian/Ubuntu (нет apt-get)."
-  apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  local attempt
+  wait_apt_lock || true
+  apt-get update -y >/dev/null || warn "apt-get update не удался — продолжаю с текущими индексами."
+  for attempt in 1 2 3; do
+    wait_apt_lock || break
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; then
+      return 0
+    fi
+    warn "apt-get install не удался (попытка ${attempt}/3) — повторю через 10 c."
+    sleep 10
+  done
+  die "Не удалось установить пакеты: $*"
+}
+
+port_of_url() {
+  # port_of_url URL — порт из URL (пусто, если явно не указан).
+  local url="$1" rest
+  [ -n "$url" ] || return 0
+  rest="${url#*://}"
+  rest="${rest%%/*}"
+  case "$rest" in
+    *:*) rest="${rest##*:}" ;;
+    *)   rest="" ;;
+  esac
+  case "$rest" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s' "$rest"
 }
 
 nginx_site_path() { printf '%s' "/etc/nginx/sites-available/${APP_NAME}"; }
@@ -514,15 +584,34 @@ setup_firewall() {
   [ "${WITH_FIREWALL:-true}" = "true" ] || return 0
   info "Настраиваю ufw: SSH/80/443 открываются ДО включения, чтобы не потерять доступ..."
   apt_install ufw
-  local port
-  port="$(ssh_port)"
-  ufw allow "${port}/tcp" >/dev/null
+
+  local ssh_p p url extra
+  ssh_p="$(ssh_port)"
+  ufw allow "${ssh_p}/tcp" >/dev/null
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
+
+  # Панель 3x-ui и подписочный сервер обычно на своих портах (например, 42932 и
+  # 2096): без них ломаются выдача конфигов и доступ в панель — открываем их.
+  for url in "$(env_value XUI_URL)" "$(env_value XUI_SUB_BASE)"; do
+    p="$(port_of_url "$url")"
+    [ -n "$p" ] || continue
+    case "$p" in 22|80|443) continue ;; esac
+    ufw allow "${p}/tcp" >/dev/null
+    ok "ufw: открыт порт ${p} (панель/подписка 3x-ui)."
+  done
+
+  # Явные доп. порты (например, порт VPN-inbound): --allow-port
+  for extra in ${EXTRA_PORTS//,/ }; do
+    [ -n "$extra" ] || continue
+    ufw allow "${extra}/tcp" >/dev/null
+    ok "ufw: открыт порт ${extra} (--allow-port)."
+  done
+
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   ufw --force enable >/dev/null
-  ok "ufw включён: открыты SSH (${port}), 80, 443; порты бота (${WEBHOOK_PORT}, ${HEALTH_PORT}) — только локально."
+  ok "ufw включён: открыты SSH (${ssh_p}), 80, 443 и порты выше; порты бота (${WEBHOOK_PORT}, ${HEALTH_PORT}) — только локально."
 }
 
 verify_deploy() {
