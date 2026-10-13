@@ -294,6 +294,44 @@ async def run() -> None:
            any("уже оплачен" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
     expect("повторная оплата не создаёт новый счёт", yk.created == created_before, str(yk.created))
 
+    print("\n1c. «Одно окно»: смена тарифа в одном заказе")
+    sw_user = 6600
+    await db.ensure_user(sw_user, "switcher", "Сменщик")
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, "menu:buy", 60))
+    expect("список тарифов показан", "Выберите тариф" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, "buy:1m", 61))
+    sw_order = int(await db.scalar(
+        "SELECT id FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1", (sw_user,)))
+    expect("заказ создан", "Заказ #" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, "menu:buy", 62))
+    expect("повторный «Купить» показывает окно заказа, а не список тарифов",
+           f"Заказ #{sw_order}" in sent("message") and "Выберите тариф" not in sent("message"),
+           sent("message")[:120])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, f"order:plans:{sw_order}", 63))
+    expect("список тарифов для смены показан", "Смена тарифа" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, "switch:3m", 64))
+    sw_count = int(await db.scalar("SELECT COUNT(*) FROM orders WHERE user_id = ?", (sw_user,)))
+    sw_row = await db.get_order(sw_order)
+    expect("смена тарифа обновила тот же заказ (второго нет)",
+           sw_count == 1 and sw_row["plan_code"] == "3m",
+           f"orders={sw_count}, plan={sw_row['plan_code']}")
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(sw_user, f"pay:yookassa:{sw_order}", 65))
+    expect("счёт выставлен", "Оплата заказа" in sent("message"), sent("message")[:80])
+    OUT.clear()
+    CALLBACK_ANSWERS.clear()
+    await dp.feed_update(bot, make_callback(sw_user, f"order:plans:{sw_order}", 66))
+    expect("при выставленном счёте смена тарифа запрещена",
+           any("Отмените заказ" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
+    sw_row = await db.get_order(sw_order)
+    expect("тариф не изменился при выставленном счёте", sw_row["plan_code"] == "3m",
+           sw_row["plan_code"])
+
     print("\n2. Промокод через бота")
     await db.create_promo("SALE25", "percent", 25, max_uses=5, expires_at=None)
     # Оплата в 1b продлила подписку на 30 дней — снова открываем окно продления,

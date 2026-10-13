@@ -63,12 +63,28 @@ def plans_kb(plans: Sequence, currency: str = "₽", prefix: str = "buy") -> Inl
     return builder.as_markup()
 
 
+def switch_plans_kb(plans: Sequence, currency: str = "₽", order_id: int | None = None) -> InlineKeyboardMarkup:
+    """Список тарифов в режиме смены тарифа внутри уже открытого заказа."""
+    builder = InlineKeyboardBuilder()
+    for plan in plans:
+        details = f"{plan['days']} дн · {human_gb(plan['traffic_gb'])} · {plan['devices']} устр."
+        builder.button(
+            text=f"{plan['title']} — {price(plan['price'], currency)} ({details})",
+            callback_data=f"switch:{plan['code']}",
+        )
+    if order_id is not None:
+        builder.button(text="◀️ Назад к заказу", callback_data=f"order:show:{order_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def payment_methods_kb(available: Iterable[str], order_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for method in available:
         if method == "yookassa":
             builder.button(text="💳 Карта / СБП", callback_data=f"pay:yookassa:{order_id}")
     builder.button(text="🎟 Промокод", callback_data=f"promo:order:{order_id}")
+    builder.button(text="🔁 Сменить тариф", callback_data=f"order:plans:{order_id}")
     builder.button(text="❌ Отменить заказ", callback_data=f"order:cancel:{order_id}")
     builder.adjust(1)
     return builder.as_markup()

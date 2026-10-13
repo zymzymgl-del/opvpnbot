@@ -38,6 +38,7 @@ from app.keyboards import (
     profile_kb,
     subscription_kb,
     support_kb,
+    switch_plans_kb,
 )
 from app.runtime import runtime as rt
 from app.services.panels import PanelError
@@ -278,6 +279,13 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
 @router.callback_query(F.data == "menu:buy")
 async def cb_plans(call: CallbackQuery, db: Database, cfg: Config, state: FSMContext) -> None:
     await state.clear()  # эта кнопка — цель «Отмены» шагов ввода
+    # «Одно окно»: пока есть незакрытый заказ — показываем именно его, а не список
+    # тарифов (иначе кажется, что можно открыть второй тариф и оплатить оба).
+    order = await db.user_pending_order(call.from_user.id, "subscription")
+    if order is not None:
+        await _show_order(call, db, cfg, int(order["id"]))
+        await call.answer()
+        return
     await _show_plans(call, db, cfg)
     await call.answer()
 
@@ -349,6 +357,98 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
         await target.message.edit_text(text, reply_markup=markup)
     except Exception:
         await target.message.answer(text, reply_markup=markup)
+
+
+async def _reissue_blocked(call: CallbackQuery, order, cfg: Config) -> bool:
+    """Сумма уже зафиксирована счётом — менять тариф/промокод нельзя.
+
+    Счёт выписан на конкретную сумму; её изменение (особенно вверх) ломает
+    сверку оплаты: деньги могут списаться, а период не выdcаться. Поэтому
+    просим сначала отменить заказ. Возвращает True, если действие заблокировано.
+    """
+    if not order["payment_id"]:
+        return False
+    await call.answer(
+        f"Уже выставлен счёт на {price(int(order['amount']), cfg.currency)}. "
+        "Отмените заказ, чтобы изменить тариф или сумму.",
+        show_alert=True,
+    )
+    return True
+
+
+@router.callback_query(F.data.startswith("order:plans:"))
+async def cb_order_plans(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    """Список тарифов для смены тарифа внутри текущего заказа."""
+    order_id = int(call.data.rsplit(":", 1)[1])
+    order = await db.get_order(order_id)
+    if not _is_owner(order, call.from_user.id):
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
+    if order["status"] != "pending":
+        await call.answer("Заказ уже неактуален.", show_alert=True)
+        return
+    if await _reissue_blocked(call, order, cfg):
+        return
+    plans = await db.active_plans()
+    if not plans:
+        await call.answer("Сейчас нет доступных тарифов.", show_alert=True)
+        return
+    text = ("🔁 <b>Смена тарифа</b>\n\n"
+            "Выберите новый тариф — он заменит текущий в этом же заказе "
+            "(второй заказ не создаётся).")
+    markup = switch_plans_kb(plans, cfg.currency, order_id)
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await call.message.answer(text, reply_markup=markup)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("switch:"))
+async def cb_switch_plan(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    """Меняет тариф у единственного незакрытого заказа (второй заказ не создаём)."""
+    code = call.data.split(":", 1)[1]
+    plan = await db.get_plan(code)
+    if plan is None or not plan["is_active"]:
+        await call.answer("Этот тариф недоступен.", show_alert=True)
+        return
+    order = await db.user_pending_order(call.from_user.id, "subscription")
+    if order is None:
+        # Заказа нет (например, только что отменили) — создаём как при покупке.
+        order_id = await db.create_order(
+            user_id=call.from_user.id, plan_code=code, amount=int(plan["price"]),
+            base_amount=int(plan["price"]), promo_code=None, method="none", kind="subscription",
+        )
+        await _show_order(call, db, cfg, order_id)
+        await call.answer()
+        return
+    order_id = int(order["id"])
+    if order["plan_code"] == code:
+        await _show_order(call, db, cfg, order_id)
+        await call.answer("Этот тариф уже выбран")
+        return
+    if await _reissue_blocked(call, order, cfg):
+        return
+    # Промокод переносим с пересчётом скидки от новой базовой цены.
+    new_base = int(plan["price"])
+    promo_code = order["promo_code"] if int(order["promo_reserved"] or 0) else None
+    discount = 0
+    if promo_code:
+        promo = await db.get_promo(promo_code)
+        if promo is not None:
+            if promo["discount_type"] == "percent":
+                discount = new_base * int(promo["value"]) // 100
+            else:
+                discount = min(int(promo["value"]), new_base)
+        else:
+            # Промокод пропал из БД — снимаем резерв заказа.
+            await db.release_promo(promo_code, call.from_user.id)
+            await db.clear_order_promo_reservation(order_id)
+            promo_code = None
+    await db.update_order_plan(order_id, code, new_base, discount, promo_code,
+                               1 if promo_code else 0)
+    await _show_order(call, db, cfg, order_id)
+    await call.answer("Тариф изменён")
 
 
 def _is_owner(order, user_id: int) -> bool:
@@ -441,6 +541,16 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
     if order["status"] != "pending":
         await _apply_window(bot, message.chat.id, window_id, "Заказ уже неактуален.", back_kb())
         return
+    if order["payment_id"]:
+        # Сумма зафиксирована счётом — менять её нельзя (риск недоплаты/потери
+        # оплаты). Сначала отменяем заказ, затем оформляем заново.
+        await _apply_window(
+            bot, message.chat.id, window_id,
+            f"Уже выставлен счёт на <b>{price(int(order['amount']), cfg.currency)}</b>. "
+            "Отмените заказ, чтобы изменить сумму.",
+            back_kb(f"order:show:{order_id}"),
+        )
+        return
 
     base = int(order["base_amount"])
     reserved_code = order["promo_code"] if int(order["promo_reserved"] or 0) else None
@@ -463,12 +573,6 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
         if reserved_code:
             # На заказе был другой промокод — освобождаем его использование.
             await db.release_promo(reserved_code, message.from_user.id)
-        if order["payment_id"]:
-            # Счёт уже выставлялся. Его не отвязываем (если он успел оплатиться,
-            # заказ всё равно должен быть выдан), а кнопка оплаты заметит
-            # расхождение суммы и выставит новый счёт.
-            log.info("Заказ #%s: сумма изменилась после выставления счёта %s",
-                     order_id, order["payment_id"])
         await db.set_order_promo(int(order_id), new_amount, discount, code)
     await _apply_window(
         bot, message.chat.id, window_id,
@@ -507,6 +611,15 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
     if not _is_owner(order, call.from_user.id):
         await call.answer("Заказ не найден.", show_alert=True)
         return
+    # «Одно окно»: если это старый незакрытый заказ, а у пользователя уже есть
+    # более новый — платим именно по новому (иначе можно оплатить два заказа).
+    if order["status"] == "pending":
+        current = await db.user_pending_order(call.from_user.id, order["kind"])
+        if current is not None and int(current["id"]) != order_id:
+            await _show_order(call, db, cfg, int(current["id"]))
+            await call.answer("⚠️ У вас есть более новый заказ — используйте его.",
+                              show_alert=True)
+            return
     # Заказ, оплаченный, но с упавшей выдачей (grant_error), — НЕ «неактуален»:
     # он ждёт повтора выдачи, иначе деньги списаны, а периода нет.
     needs_regrant = order["status"] == "paid" and bool(order["grant_error"])

@@ -268,6 +268,15 @@ async def run() -> None:
     check("незакрытый заказ находится без привязки к тарифу",
           any_pending is not None and int(any_pending["id"]) == order2)
 
+    # Смена тарифа в том же заказе (режим «одно окно»): пересчёт суммы со скидкой
+    await db.update_order_plan(order2, "3m", 405, 101, "SALE25", 1)
+    switched = await db.get_order(order2)
+    check("смена тарифа обновила тариф/сумму с пересчётом скидки",
+          switched["plan_code"] == "3m" and int(switched["base_amount"]) == 405
+          and int(switched["amount"]) == 405 - 101 and int(switched["promo_reserved"]) == 1,
+          f"plan={switched['plan_code']}, base={switched['base_amount']}, "
+          f"amount={switched['amount']}")
+
     print("\n5. Промокоды")
     await db.create_promo("vpn10", "percent", 10, max_uses=1, expires_at=None)
     ok, reason, promo = await db.promo_valid("VPN10", 3001)

@@ -442,6 +442,21 @@ class Database:
             (amount, discount, promo_code, order_id),
         )
 
+    async def update_order_plan(self, order_id: int, plan_code: str, base_amount: int,
+                                discount: int = 0, promo_code: str | None = None,
+                                promo_reserved: int = 0) -> None:
+        """Меняет тариф у неоплаченного заказа (режим «одно окно»).
+
+        Сумма пересчитывается от новой базовой цены с учётом текущей скидки
+        (промокод переносится с пересчётом). Меняет только ``pending``-заказы.
+        """
+        await self.execute(
+            "UPDATE orders SET plan_code = ?, base_amount = ?, amount = ?, discount = ?, "
+            "promo_code = ?, promo_reserved = ? WHERE id = ? AND status = 'pending'",
+            (plan_code, base_amount, max(1, base_amount - discount), discount,
+             promo_code, promo_reserved, order_id),
+        )
+
     async def set_order_grant_error(self, order_id: int, error: str) -> None:
         """Помечает оплаченный заказ как «выдача не удалась» (или снимает метку).
 
