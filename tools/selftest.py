@@ -88,15 +88,28 @@ class FakeBot:
         self.messages: list[tuple[int, str]] = []
         self.photos: list[int] = []
         self.markups: list[tuple[int, object]] = []
+        self._next_id = 1000
+
+    def _msg(self):
+        self._next_id += 1
+        return SimpleNamespace(message_id=self._next_id)
 
     async def send_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=None, **kw):
         self.messages.append((int(chat_id), text))
         self.markups.append((int(chat_id), reply_markup))
-        return None
+        return self._msg()
 
-    async def send_photo(self, chat_id, photo=None, caption=None, **kw):
+    async def edit_message_text(self, text, chat_id=None, message_id=None, reply_markup=None, **kw):
+        self.messages.append((int(chat_id), text))
+        self.markups.append((int(chat_id), reply_markup))
+        return self._msg()
+
+    async def delete_message(self, chat_id, message_id=None, **kw):
+        return True
+
+    async def send_photo(self, chat_id, photo=None, caption=None, reply_markup=None, **kw):
         self.photos.append(int(chat_id))
-        return None
+        return self._msg()
 
     def last_text_for(self, chat_id: int) -> str:
         for cid, text in reversed(self.messages):
@@ -688,8 +701,16 @@ async def run() -> None:
             outer = self
 
             class _Msg:
+                def __init__(self):
+                    self.chat = SimpleNamespace(id=user_id)
+                    self.message_id = 1
+
                 async def edit_text(self, text, reply_markup=None):
                     outer.edits.append((text, reply_markup))
+
+                async def answer(self, text, reply_markup=None, **kw):
+                    outer.edits.append((text, reply_markup))
+                    return SimpleNamespace(message_id=2, chat=self.chat)
 
             self.message = _Msg()
 

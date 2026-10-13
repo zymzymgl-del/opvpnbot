@@ -40,6 +40,7 @@ from app.keyboards import (
     support_kb,
     switch_plans_kb,
 )
+from app import ui
 from app.runtime import runtime as rt
 from app.services.panels import PanelError
 from app.services.payments import PaymentError
@@ -97,20 +98,24 @@ async def _edit_or_answer(
     """Правит текущее сообщение (режим одного окна), иначе шлёт новое."""
     try:
         await call.message.edit_text(text, reply_markup=markup)
+        ui.remember(call.message.chat.id, call.message.message_id)
     except Exception as exc:  # noqa: BLE001 — ожидаемо для недоступных/старых сообщений
         if "message can't be edited" not in str(exc).lower():
             log.warning("Не удалось отредактировать меню: %s", exc)
-        await call.message.answer(text, reply_markup=markup)
+        sent = await call.message.answer(text, reply_markup=markup)
+        if getattr(sent, "message_id", None):
+            ui.remember(call.message.chat.id, sent.message_id)
 
 
 async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
     await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
 
 
-async def _send_menu_window(message: Message, text: str, cfg: Config) -> None:
-    """Показывает окно меню с инлайн-кнопками (режим одного окна)."""
-    await message.answer(
-        text, reply_markup=main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+async def _send_menu_window(bot: Bot, message: Message, text: str, cfg: Config) -> None:
+    """Показывает окно меню с инлайн-кнопками в едином окне чата."""
+    await ui.ui_text(
+        bot, message.chat.id, text,
+        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
 
 
 #: Ключ в FSM-данных: id сообщения-«окна», которое правят шаги ввода текста.
@@ -133,10 +138,13 @@ async def _apply_window(bot: Bot, chat_id: int, window_id, text: str, markup=Non
     if isinstance(window_id, int):
         try:
             await bot.edit_message_text(text, chat_id=chat_id, message_id=window_id, reply_markup=markup)
+            ui.remember(chat_id, window_id)
             return
         except Exception as exc:  # окно могло быть удалено — не критично
             log.info("Не удалось обновить окно %s: %s", window_id, exc)
-    await bot.send_message(chat_id, text, reply_markup=markup)
+    sent = await bot.send_message(chat_id, text, reply_markup=markup)
+    if getattr(sent, "message_id", None):
+        ui.remember(chat_id, sent.message_id)
 
 
 class PromoStates(StatesGroup):
@@ -165,7 +173,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
 
         result = await bind_claim(bot, cfg, db, user.id, payload[len(CLAIM_PREFIX):])
         prefix = "🎉 " if result.ok else "⚠️ "
-        await _send_menu_window(message, prefix + esc(result.message), cfg)
+        await _send_menu_window(bot, message, prefix + esc(result.message), cfg)
         return
 
     tail = "Все покупки — в «🔑 Моя подписка», профиль — в «👤 Профиль», вопросы — «🆘 Поддержка». Меню ниже 👇"
@@ -180,12 +188,12 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     sub = await db.active_subscription(user.id)
     if sub is not None:
         greeting += f"\n🟢 Ваша подписка активна, осталось <b>{human_left(sub['expires_at'])}</b>."
-    await _send_menu_window(message, greeting, cfg)
+    await _send_menu_window(bot, message, greeting, cfg)
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message, cfg: Config) -> None:
-    await _send_menu_window(message, MAIN_MENU_TEXT, cfg)
+async def cmd_menu(message: Message, cfg: Config, bot: Bot) -> None:
+    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg)
 
 
 #: Тексты кнопок старой reply-клавиатуры — для бесшовного перехода пользователей.
@@ -193,9 +201,9 @@ LEGACY_REPLY_TEXTS = {BTN_BUY, BTN_MY_KEYS, BTN_PROFILE, BTN_SUPPORT, BTN_TRIAL,
 
 
 @router.message(F.text.in_(LEGACY_REPLY_TEXTS))
-async def msg_legacy_reply_button(message: Message, cfg: Config) -> None:
-    """Нажатие кнопки со старой reply-клавиатуры: показываем новое инлайн-меню."""
-    await _send_menu_window(message, MAIN_MENU_TEXT, cfg)
+async def msg_legacy_reply_button(message: Message, cfg: Config, bot: Bot) -> None:
+    """Нажатие кнопки со старой reply-клавиатуры: показываем инлайн-меню в окне."""
+    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg)
 
 
 @router.callback_query(F.data == "menu:main")
@@ -247,8 +255,11 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
         if isinstance(target, CallbackQuery):
             try:
                 await target.message.edit_text(text)
+                ui.remember(target.message.chat.id, target.message.message_id)
             except Exception:
-                await target.message.answer(text)
+                sent = await target.message.answer(text)
+                if getattr(sent, "message_id", None):
+                    ui.remember(target.message.chat.id, sent.message_id)
         else:
             await target.answer(text)
         return
@@ -270,8 +281,11 @@ async def _show_plans(target: Message | CallbackQuery, db: Database, cfg: Config
     if isinstance(target, CallbackQuery):
         try:
             await target.message.edit_text(text, reply_markup=markup)
+            ui.remember(target.message.chat.id, target.message.message_id)
         except Exception:
-            await target.message.answer(text, reply_markup=markup)
+            sent = await target.message.answer(text, reply_markup=markup)
+            if getattr(sent, "message_id", None):
+                ui.remember(target.message.chat.id, sent.message_id)
     else:
         await target.answer(text, reply_markup=markup)
 
@@ -355,8 +369,11 @@ async def _show_order(target: CallbackQuery, db: Database, cfg: Config, order_id
     markup = payment_methods_kb(available, order_id)
     try:
         await target.message.edit_text(text, reply_markup=markup)
+        ui.remember(target.message.chat.id, target.message.message_id)
     except Exception:
-        await target.message.answer(text, reply_markup=markup)
+        sent = await target.message.answer(text, reply_markup=markup)
+        if getattr(sent, "message_id", None):
+            ui.remember(target.message.chat.id, sent.message_id)
 
 
 async def _reissue_blocked(call: CallbackQuery, order, cfg: Config) -> bool:
@@ -476,14 +493,20 @@ async def cb_cancel_order(call: CallbackQuery, db: Database, cfg: Config) -> Non
         await call.answer("Заказ не найден.", show_alert=True)
         return
     if order["status"] != "pending":
+        await _show_main_menu(call, cfg)
         await call.answer("Заказ уже неактуален.", show_alert=True)
         return
     if order["promo_code"] and int(order["promo_reserved"] or 0):
         await db.release_promo(order["promo_code"], call.from_user.id)
         await db.clear_order_promo_reservation(order_id)
     await db.set_order_status(order_id, "canceled")
-    await call.message.edit_text("❌ Заказ отменён. Если оплата уже ушла — напишите в поддержку.")
-    await call.answer()
+    # Возвращаем пользователя в главное меню (раньше окно оставалось без кнопок — «тупик»).
+    await _edit_or_answer(
+        call,
+        "❌ Заказ отменён. Если оплата уже ушла — напишите в поддержку.\n\n" + MAIN_MENU_TEXT,
+        main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled),
+    )
+    await call.answer("Заказ отменён")
 
 
 # --- промокоды ---
@@ -599,8 +622,8 @@ async def _render_checkout(call: CallbackQuery, cfg: Config, order_id: int, amou
         "После оплаты вернитесь в бот и нажмите «🔄 Проверить оплату». "
         "Если включены вебхуки — доступ выдастся автоматически."
     )
-    await call.message.edit_text(text, reply_markup=checkout_kb(url, order_id) if url
-                                 else back_kb(f"order:show:{order_id}"))
+    await _edit_or_answer(call, text, checkout_kb(url, order_id) if url
+                          else back_kb(f"order:show:{order_id}"))
 
 
 @router.callback_query(F.data.startswith("pay:"))
@@ -801,10 +824,7 @@ async def cb_sub_view(call: CallbackQuery, db: Database, cfg: Config) -> None:
         f"🔗 <code>{esc(link)}</code>"
     )
     markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "", cfg.support_username)
-    try:
-        await call.message.edit_text(text, reply_markup=markup)
-    except Exception:
-        await call.message.answer(text, reply_markup=markup)
+    await _edit_or_answer(call, text, markup)
     await call.answer()
 
 
@@ -853,7 +873,7 @@ async def cb_sub_copy(call: CallbackQuery, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("sub:qr:"))
-async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
+async def cb_sub_qr(call: CallbackQuery, db: Database, bot: Bot) -> None:
     from aiogram.types import BufferedInputFile
 
     sub = await _load_own_sub(call, db)
@@ -864,15 +884,13 @@ async def cb_sub_qr(call: CallbackQuery, db: Database) -> None:
     if png is None:
         await call.answer("Генерация QR недоступна (не установлен модуль qrcode).", show_alert=True)
         return
-    # Как и «Как подключиться», переключаемся в отдельное окно с кнопкой возврата;
-    # сам QR приходит новым сообщением (фото отредактировать нельзя).
-    await _edit_or_answer(
-        call,
-        f"📷 <b>QR-код подписки #{sub['id']}</b>\n\nОтправлен ниже сообщением — отсканируйте его в приложении VPN.",
-        _sub_back_kb(int(sub["id"])),
+    # QR — это фото, текст в него не правится: показываем его в том же окне
+    # (прошлое сообщение удаляем) с кнопкой возврата к подписке.
+    await ui.ui_photo(
+        bot, call.message.chat.id, BufferedInputFile(png, filename="vpn-qr.png"),
+        caption=f"📷 <b>QR-код подписки #{sub['id']}</b>\nОтсканируйте его в приложении VPN.",
+        reply_markup=_sub_back_kb(int(sub["id"])),
     )
-    await call.message.answer_photo(BufferedInputFile(png, filename="vpn-qr.png"),
-                                    caption="📷 Отсканируйте QR-код в приложении VPN")
     await call.answer()
 
 
@@ -1006,7 +1024,7 @@ async def cb_orders_history(call: CallbackQuery, db: Database, cfg: Config) -> N
             f"#{order['id']} · {esc(order['plan_code'])} · {price(int(order['amount']), cfg.currency)} · "
             f"{STATUS_RU.get(order['status'], order['status'])} · {order['created_at'][:10]}"
         )
-    await call.message.answer("\n".join(lines), reply_markup=back_kb("menu:profile", "◀️ В профиль"))
+    await _edit_or_answer(call, "\n".join(lines), back_kb("menu:profile", "◀️ В профиль"))
     await call.answer()
 
 
@@ -1106,8 +1124,8 @@ async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, cf
 # Помощь и правовые документы
 # ---------------------------------------------------------------------------
 @router.message(Command("help"))
-async def msg_help(message: Message, cfg: Config) -> None:
-    await message.answer(FAQ_TEXT, reply_markup=back_kb("menu:main"))
+async def msg_help(message: Message, cfg: Config, bot: Bot) -> None:
+    await ui.ui_text(bot, message.chat.id, FAQ_TEXT, back_kb("menu:main"))
 
 
 @router.callback_query(F.data == "menu:help")
@@ -1117,7 +1135,7 @@ async def cb_help(call: CallbackQuery) -> None:
 
 
 @router.message(Command("terms"))
-async def cmd_terms(message: Message, cfg: Config) -> None:
+async def cmd_terms(message: Message, cfg: Config, bot: Bot) -> None:
     text = cfg.terms_text or (
         "📄 <b>Условия использования</b>\n\n"
         "1. Сервис предоставляется «как есть» для личного использования.\n"
@@ -1126,11 +1144,11 @@ async def cmd_terms(message: Message, cfg: Config) -> None:
         "4. Один конфиг — до указанного в тарифе количества устройств.\n"
         "5. Возврат средств — по решению поддержки в течение 3 дней с момента оплаты."
     )
-    await message.answer(text, reply_markup=back_kb("menu:main"))
+    await ui.ui_text(bot, message.chat.id, text, back_kb("menu:main"))
 
 
 @router.message(Command("privacy"))
-async def cmd_privacy(message: Message, cfg: Config) -> None:
+async def cmd_privacy(message: Message, cfg: Config, bot: Bot) -> None:
     text = cfg.privacy_text or (
         "🔒 <b>Политика конфиденциальности</b>\n\n"
         "• Мы храним только Telegram ID, username и данные о заказах — для выдачи доступа и поддержки.\n"
@@ -1138,7 +1156,7 @@ async def cmd_privacy(message: Message, cfg: Config) -> None:
         "• Трафик пользователя не логируется.\n"
         "• Удалить свои данные можно, обратившись в поддержку."
     )
-    await message.answer(text, reply_markup=back_kb("menu:main"))
+    await ui.ui_text(bot, message.chat.id, text, back_kb("menu:main"))
 
 
 @router.callback_query(F.data.startswith("adm:"))

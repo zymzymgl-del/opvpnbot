@@ -15,6 +15,7 @@ from app.config import Config
 from app.db import Database, from_iso, to_iso, utcnow
 from app.keyboards import subscription_kb
 from app.logctx import set_request_id
+from app import ui
 from app.services.panels import PanelError, get_panel
 from app.runtime import runtime as rt
 from app.services.payments import YooKassaClient
@@ -86,21 +87,18 @@ async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: i
         "Нажмите кнопку ниже, чтобы получить QR-код и инструкцию по подключению."
     )
     markup = subscription_kb(sub_row["id"], sub_url, sub_row["vpn_key"] or "", cfg.support_username)
-    await safe_send(bot, user_id, text, markup)
+    await ui.ui_text(bot, user_id, text, markup)
 
     if with_qr and link:
         qr = make_qr_png(link)
         if qr:
-            try:
-                from aiogram.types import BufferedInputFile
+            from aiogram.types import BufferedInputFile
 
-                await bot.send_photo(
-                    user_id,
-                    BufferedInputFile(qr, filename="vpn-qr.png"),
-                    caption="📷 QR-код вашей конфигурации — отсканируйте в приложении VPN.",
-                )
-            except Exception as exc:  # pragma: no cover
-                log.info("QR не отправлен: %s", exc)
+            await ui.ui_photo(
+                bot, user_id, BufferedInputFile(qr, filename="vpn-qr.png"),
+                caption="📷 QR-код вашей конфигурации — отсканируйте в приложении VPN.",
+                reply_markup=markup,
+            )
 
 
 async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, plan_code: str,
@@ -180,7 +178,7 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
                 header = "Подписка возобновлена" if reactivating else "Подписка продлена"
                 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-                await safe_send(
+                await ui.ui_text(
                     bot, user_id,
                     f"✅ <b>{header} до {fmt_dt(new_expires)}</b> (+{days} дн.)\n"
                     f"Тариф: <b>{esc(shown_plan)}</b> · устройств: <b>{new_devices}</b> · трафик: <b>{traffic_label}</b>\n\n"

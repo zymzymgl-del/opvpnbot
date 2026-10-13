@@ -76,6 +76,13 @@ def install_stubs(bot: Bot) -> None:
             return sent.as_(self)
         elif name == "SendPhoto":
             OUT.append(("photo", getattr(method, "caption", "") or ""))
+            return Message.model_construct(
+                message_id=abs(hash("photo")) % 100000 + 1,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=getattr(method, "chat_id", 0), type="private"),
+                from_user=User(id=1, is_bot=True, first_name="TestBot"),
+                caption=getattr(method, "caption", "") or "",
+            ).as_(self)
         elif name == "SendDocument":
             OUT.append(("document", getattr(method, "caption", "") or ""))
         elif name == "SendInvoice":
