@@ -524,8 +524,12 @@ setup_nginx() {
     return 0
   fi
 
-  info "Устанавливаю nginx и certbot..."
-  apt_install nginx certbot python3-certbot-nginx curl
+  info "Проверяю nginx и certbot..."
+  # Ставим только отсутствующее: на повторных запусках apt вообще не трогаем
+  # (значит и не ждём dpkg-лок, который держит unattended-upgrades).
+  if ! have nginx || ! have certbot || ! have curl; then
+    apt_install nginx certbot python3-certbot-nginx curl
+  fi
 
   tmpl="$INSTALL_DIR/deploy/nginx/opvpnbot.conf.tmpl"
   [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/deploy/nginx/opvpnbot.conf.tmpl"
@@ -583,7 +587,7 @@ ssh_port() {
 setup_firewall() {
   [ "${WITH_FIREWALL:-true}" = "true" ] || return 0
   info "Настраиваю ufw: SSH/80/443 открываются ДО включения, чтобы не потерять доступ..."
-  apt_install ufw
+  have ufw || apt_install ufw
 
   local ssh_p p url extra
   ssh_p="$(ssh_port)"
