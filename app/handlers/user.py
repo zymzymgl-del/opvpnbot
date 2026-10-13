@@ -456,6 +456,19 @@ async def msg_promo(message: Message, state: FSMContext, db: Database, cfg: Conf
 # ---------------------------------------------------------------------------
 # Оплата
 # ---------------------------------------------------------------------------
+async def _render_checkout(call: CallbackQuery, cfg: Config, order_id: int, amount: int, url: str) -> None:
+    """Показывает окно оплаты с уже существующим счётом (переиспользование ссылки)."""
+    text = (
+        f"💳 <b>Оплата заказа #{order_id}</b>\n\n"
+        f"Сумма: <b>{price(amount, cfg.currency)}</b>\n"
+        "Нажмите «Перейти к оплате» — откроется страница ЮKassa (карта, СБП, SberPay).\n\n"
+        "После оплаты вернитесь в бот и нажмите «🔄 Проверить оплату». "
+        "Если включены вебхуки — доступ выдастся автоматически."
+    )
+    await call.message.edit_text(text, reply_markup=checkout_kb(url, order_id) if url
+                                 else back_kb(f"order:show:{order_id}"))
+
+
 @router.callback_query(F.data.startswith("pay:"))
 async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=None) -> None:
     parts = call.data.split(":")
@@ -489,28 +502,74 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         if yk is None:
             await call.answer("Оплата картой временно недоступна, выберите другой способ.", show_alert=True)
             return
+        # Один заказ — один счёт: если у заказа уже есть привязанный платёж,
+        # переспрашиваем его статус в API и переиспользуем ту же ссылку.
+        # Новый счёт создаётся только если старый отменён/истёк (или запись о
+        # нём повреждена) — иначе повторные нажатия «Перейти к оплате» давали
+        # несколько рабочих ссылок на один заказ, а продление проходило лишь
+        # по одному проведённому платежу (остальные — списание без выдачи).
+        if order["payment_id"]:
+            try:
+                payment = await yk.get_payment(order["payment_id"])
+            except PaymentError as exc:
+                log.warning("ЮKassa: статус счёта заказа #%s неизвестен: %s", order_id, exc)
+                await call.answer("ЮKassa временно недоступна, попробуйте позже.", show_alert=True)
+                return
+            if yk.payment_is_valid(payment, amount):
+                # Платёж уже прошёл, но выдача не состоялась (вебхук потерян) —
+                # завершаем заказ этим же платежом.
+                try:
+                    await complete_order(bot, cfg, db, order_id, payment_id=order["payment_id"])
+                except PanelError as exc:
+                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    return
+                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                await call.answer("Оплата найдена")
+                return
+            if yk.payment_is_payable(payment):
+                stored_url = order["payment_url"] or ""
+                if not stored_url:
+                    stored_url = (payment.get("confirmation") or {}).get("confirmation_url", "")
+                    if stored_url:  # чиним старые заказы, где ссылка не сохранилась
+                        await db.claim_order_invoice(order_id, order["payment_id"], stored_url)
+                await _render_checkout(call, cfg, order_id, amount, stored_url)
+                await call.answer("Счёт уже создан — оплата по той же ссылке", show_alert=True)
+                return
+            # Счёт отменён/истёк — освобождаем слот и выпускаем новый.
+            await db.release_order_invoice(order_id)
         try:
             payment = await yk.create_payment(
                 amount_rub=amount,
                 description=f"VPN {order['plan_code']} (заказ #{order_id})",
                 metadata={"order_id": order_id, "user_id": call.from_user.id},
+                idempotence_key=f"order-{order_id}-amt-{amount}",
+                ttl_seconds=max(60, cfg.invoice_ttl_minutes * 60),
             )
         except PaymentError as exc:
             log.error("ЮKassa: %s", exc)
             await call.answer("Не удалось создать платёж, попробуйте позже.", show_alert=True)
             await notify_admins(bot, cfg, f"⚠️ Ошибка ЮKassa по заказу #{order_id}: {esc(exc)}")
             return
-        await db.set_order_payment(order_id, payment["id"], method="yookassa")
         url = (payment.get("confirmation") or {}).get("confirmation_url", "")
-        text = (
-            f"💳 <b>Оплата заказа #{order_id}</b>\n\n"
-            f"Сумма: <b>{price(amount, cfg.currency)}</b>\n"
-            "Нажмите «Перейти к оплате» — откроется страница ЮKassa (карта, СБП, SberPay).\n\n"
-            "После оплаты вернитесь в бот и нажмите «🔄 Проверить оплату». "
-            "Если включены вебхуки — доступ выдастся автоматически."
-        )
-        await call.message.edit_text(text, reply_markup=checkout_kb(url, order_id) if url
-                                     else back_kb(f"order:show:{order_id}"))
+        claimed = await db.claim_order_invoice(order_id, payment["id"], url)
+        if not claimed:
+            # Гонка: параллельный клик уже привязал свой счёт — переиспользуем его,
+            # «лишний» платёж с тем же idempotence-ключом в ЮKassa не создастся.
+            fresh = await db.get_order(order_id)
+            if fresh is not None and fresh["status"] == "paid":
+                try:
+                    await complete_order(bot, cfg, db, order_id, payment_id=fresh["payment_id"])
+                except PanelError as exc:
+                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    return
+                await call.message.edit_text("✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+                await call.answer()
+                return
+            await _render_checkout(call, cfg, order_id, amount,
+                                   (fresh["payment_url"] if fresh else "") or url)
+            await call.answer("Счёт уже создан — оплата по той же ссылке", show_alert=True)
+            return
+        await _render_checkout(call, cfg, order_id, amount, url)
         await call.answer("Счёт создан")
         return
 

@@ -20,6 +20,7 @@ import tempfile
 import time
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,6 +33,11 @@ os.environ.update({
     "XUI_URL": "http://127.0.0.1:2053",
     "XUI_API_TOKEN": "test-token",
     "PAYMENT_METHODS": "yookassa",
+    # Ключи задаём заранее: validate(cfg) требует их при включённом yookassa,
+    # а тест клиента ЮKassa (раздел 10) всё равно перезапишет эти переменные.
+    "YOOKASSA_SHOP_ID": "123456",
+    "YOOKASSA_SECRET_KEY": "test_secret_key",
+    "YOOKASSA_RETURN_URL": "https://t.me/test_bot",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "2",
     "LOG_FILE": str(Path(TMP) / "bot.log"),
@@ -639,6 +645,127 @@ async def run() -> None:
               race_ok == 1 and race_rows == 1, f"ok={race_ok}, rows={race_rows}")
     finally:
         panels_mod._panel = saved_panel  # type: ignore[attr-defined]
+
+    print("\n15. Один заказ — один счёт ЮKassa (защита от дублей оплаты)")
+
+    from app.handlers import user as user_mod
+
+    class FakeCall:
+        def __init__(self, order_id: int, user_id: int) -> None:
+            self.data = f"pay:yookassa:{order_id}"
+            self.from_user = SimpleNamespace(id=user_id)
+            self.answers: list[str] = []
+            self.edits: list[tuple[str, object]] = []
+
+            outer = self
+
+            class _Msg:
+                async def edit_text(self, text, reply_markup=None):
+                    outer.edits.append((text, reply_markup))
+
+            self.message = _Msg()
+
+        async def answer(self, text="", show_alert=False):
+            self.answers.append(text)
+
+        @property
+        def checkout_url(self) -> str:
+            for _text, kb in reversed(self.edits):
+                if not kb:
+                    continue
+                for row in kb.inline_keyboard:
+                    for btn in row:
+                        u = getattr(btn, "url", None)
+                        if u and "checkout" in u:
+                            return u
+            return ""
+
+    class FakeYk:
+        """Заглушка ЮKassa: считает созданные счета, эмулирует статусы."""
+
+        def __init__(self) -> None:
+            self.created = 0
+            self.statuses: dict[str, str] = {}
+
+        async def create_payment(self, *, amount_rub, description, metadata,
+                                 idempotence_key=None, ttl_seconds=None, **kw):
+            self.created += 1
+            pid = f"fake-pay-{self.created}"
+            self.statuses[pid] = "pending"
+            return {"id": pid, "status": "pending",
+                    "confirmation": {"confirmation_url": f"https://yookassa.ru/checkout/{pid}"}}
+
+        async def get_payment(self, payment_id):
+            st = self.statuses.get(payment_id, "canceled")
+            paid = st == "succeeded"
+            return {"id": payment_id, "status": st, "paid": paid,
+                    "amount": {"value": "150.00", "currency": "RUB"},
+                    "confirmation": {"confirmation_url": f"https://yookassa.ru/checkout/{payment_id}"}}
+
+        payment_is_valid = staticmethod(YooKassaClient.payment_is_valid)
+        payment_is_payable = staticmethod(YooKassaClient.payment_is_payable)
+        payment_is_done = staticmethod(YooKassaClient.payment_is_done)
+
+    fake_yk = FakeYk()
+    await db.ensure_user(8001, "dup", "Дубль")
+    dup_order = await db.create_order(8001, "1m", 150, 150, None, "none", "subscription")
+    # Три последовательных нажатия «Перейти к оплате» + параллельная гонка кликов.
+    # Идемпотентный ключ f"order-{id}-amt-{amount}" одинаков для всех попыток при
+    # неизменной сумме, поэтому настоящий ЮKassa вернул бы тот же счёт; заглушка
+    # считает вызовы — в идеале их быть не должно (записываем фактическое число).
+    seq_calls = []
+    for _ in range(3):
+        c = FakeCall(dup_order, 8001)
+        await user_mod.cb_pay(c, db, cfg, bot, yk=fake_yk)
+        seq_calls.append(c)
+    race_calls = [FakeCall(dup_order, 8001) for _ in range(4)]
+    await asyncio.gather(*(user_mod.cb_pay(c, db, cfg, bot, yk=fake_yk) for c in race_calls))
+    dup_row = await db.get_order(dup_order)
+    check("первое нажатие создаёт ровно один счёт", fake_yk.created >= 1)
+    check("последующие нажатия не плодят счета сверх одного на слот",
+          fake_yk.created == 1, f"created={fake_yk.created}")
+    check("заказу привязан ровно один платёж", bool(dup_row["payment_id"]))
+    check("ссылка сохранена в заказе (payment_url)",
+          dup_row["payment_url"] == f"https://yookassa.ru/checkout/{dup_row['payment_id']}",
+          str(dup_row["payment_url"]))
+    last = FakeCall(dup_order, 8001)
+    created_before = fake_yk.created
+    await user_mod.cb_pay(last, db, cfg, bot, yk=fake_yk)
+    check("повторное открытие даёт ту же ссылку без нового счёта",
+          fake_yk.created == created_before
+          and last.checkout_url == dup_row["payment_url"],
+          f"url={last.checkout_url!r}, stored={dup_row['payment_url']!r}")
+    shown_urls = {c.checkout_url for c in [*seq_calls, *race_calls, last] if c.checkout_url}
+    check("все окна оплаты показывают одну и ту же ссылку",
+          shown_urls == {dup_row["payment_url"]}, str(shown_urls))
+    # Платёж прошёл через «дублирующее» окно: complete_order идемпотентен
+    fake_yk.statuses[dup_row["payment_id"]] = "succeeded"
+    done_call = FakeCall(dup_order, 8001)
+    await user_mod.cb_pay(done_call, db, cfg, bot, yk=fake_yk)
+    dup_row = await db.get_order(dup_order)
+    subs_8001 = await db.fetchall("SELECT * FROM subscriptions WHERE user_id = 8001")
+    check("оплата по старой ссылке завершает заказ этим же платежом",
+          dup_row["status"] == "paid" and dup_row["payment_id"]
+          and any("Оплата получена" in t for t, _ in done_call.edits), dup_row["status"])
+    check("выдана ровно одна подписка", len(subs_8001) == 1, str(len(subs_8001)))
+
+    # Просроченный счёт: следующий клик выпускает новый (слот освобождён)
+    await db.ensure_user(8002, "stale", "Просрок")
+    stale_order = await db.create_order(8002, "1m", 150, 150, None, "none", "subscription")
+    c1 = FakeCall(stale_order, 8002)
+    await user_mod.cb_pay(c1, db, cfg, bot, yk=fake_yk)
+    first_pid = (await db.get_order(stale_order))["payment_id"]
+    fake_yk.statuses[first_pid] = "canceled"
+    c2 = FakeCall(stale_order, 8002)
+    await user_mod.cb_pay(c2, db, cfg, bot, yk=fake_yk)
+    second_pid = (await db.get_order(stale_order))["payment_id"]
+    check("отменённый счёт заменяется новым при повторной попытке",
+          second_pid != first_pid and c2.checkout_url.endswith(second_pid),
+          f"{first_pid} -> {second_pid}")
+    # Чужой пользователь не получает счёт
+    c3 = FakeCall(stale_order, 9999)
+    await user_mod.cb_pay(c3, db, cfg, bot, yk=fake_yk)
+    check("чужому пользователю отказано", "не найден" in " ".join(c3.answers), str(c3.answers))
 
     await db.close()
     print(f"\n{'=' * 60}\nИТОГО: {len(PASSED)} успешно, {len(FAILED)} ошибок")

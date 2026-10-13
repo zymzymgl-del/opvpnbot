@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS orders (
     kind            TEXT NOT NULL DEFAULT 'subscription',
     status          TEXT NOT NULL DEFAULT 'pending',
     payment_id      TEXT,
+    payment_url     TEXT,
     created_at      TEXT NOT NULL,
     paid_at         TEXT,
     note            TEXT
@@ -219,9 +220,9 @@ class Database:
         """Идемпотентные миграции для уже существующих БД.
 
         Новые БД получают актуальную схему из ``SCHEMA``; старые догоняются
-        здесь: колонка ``orders.promo_reserved`` и уникальность пары
-        ``promo_uses(code, user_id)`` (перед созданием индекса дубликаты
-        сводятся к самой ранней записи).
+        здесь: колонки ``orders.promo_reserved`` / ``orders.payment_url`` и
+        уникальность пары ``promo_uses(code, user_id)`` (перед созданием
+        индекса дубликаты сводятся к самой ранней записи).
         """
         async with self._lock:
             cur = await self.conn.execute("PRAGMA table_info(orders)")
@@ -230,6 +231,8 @@ class Database:
                 await self.conn.execute(
                     "ALTER TABLE orders ADD COLUMN promo_reserved INTEGER NOT NULL DEFAULT 0"
                 )
+            if "payment_url" not in columns:
+                await self.conn.execute("ALTER TABLE orders ADD COLUMN payment_url TEXT")
             await self.conn.execute(
                 "DELETE FROM promo_uses WHERE id NOT IN "
                 "(SELECT MIN(id) FROM promo_uses GROUP BY code, user_id)"
@@ -400,6 +403,12 @@ class Database:
     async def get_order(self, order_id: int) -> Optional[aiosqlite.Row]:
         return await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
 
+    async def order_by_payment(self, payment_id: str) -> Optional[aiosqlite.Row]:
+        """Заказ, к которому привязан платёж ЮKassa (для обработки вебхука)."""
+        return await self.fetchone(
+            "SELECT * FROM orders WHERE payment_id = ? ORDER BY id DESC LIMIT 1", (payment_id,)
+        )
+
     async def set_order_status(self, order_id: int, status: str, payment_id: str | None = None) -> None:
         if payment_id is not None:
             await self.execute(
@@ -423,11 +432,37 @@ class Database:
             (amount, discount, promo_code, order_id),
         )
 
-    async def set_order_payment(self, order_id: int, payment_id: str, method: str = "yookassa") -> None:
-        """Фиксирует у заказа способ оплаты и id платежа во внешней системе."""
+    async def claim_order_invoice(self, order_id: int, payment_id: str, confirmation_url: str,
+                                  method: str = "yookassa") -> bool:
+        """Атомарно привязывает счёт ЮKassa к неоплаченному заказу («занять счёт»).
+
+        Возвращает ``True``, если именно этот вызов записал платёж, и ``False``,
+        если у заказа уже есть свой платёж (или заказ завершён). Пара
+        ``payment_id``/``confirmation_url`` сохраняется вместе с id платежа,
+        поэтому повторное нажатие «Заплатить» по тому же заказу получает ту же
+        ссылку, а не новый счёт: один заказ — один платёж.
+        """
+        async with self._lock:
+            cur = await self.conn.execute(
+                "UPDATE orders SET method = ?, payment_id = ?, payment_url = ? "
+                "WHERE id = ? AND status = 'pending' AND (payment_id IS NULL OR payment_id = '')",
+                (method, payment_id, confirmation_url, order_id),
+            )
+            claimed = cur.rowcount > 0
+            await self.conn.commit()
+            return claimed
+
+    async def release_order_invoice(self, order_id: int) -> None:
+        """Снимает занятый счёт с заказа (если платёж не подтвердился).
+
+        После этого пользователь может запросить новую ссылку на оплату;
+        старый непроведённый счёт остаётся в ЮKassa и просто истекает по
+        ``ttl``. Идемпотентен: не трогает оплаченные заказы.
+        """
         await self.execute(
-            "UPDATE orders SET method = ?, payment_id = ? WHERE id = ?",
-            (method, payment_id, order_id),
+            "UPDATE orders SET payment_id = NULL, payment_url = NULL "
+            "WHERE id = ? AND status = 'pending'",
+            (order_id,),
         )
 
     async def claim_order_for_payment(self, order_id: int, payment_id: str | None = None) -> bool:

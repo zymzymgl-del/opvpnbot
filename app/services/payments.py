@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import aiohttp
@@ -57,8 +58,14 @@ class YooKassaClient:
 
     async def create_payment(self, *, amount_rub: int, description: str, metadata: dict[str, Any],
                              idempotence_key: str | None = None,
-                             payment_method: str | None = None) -> dict[str, Any]:
-        """Создаёт платёж и возвращает объект ЮKassa (нужен confirmation_url)."""
+                             payment_method: str | None = None,
+                             ttl_seconds: int | None = None) -> dict[str, Any]:
+        """Создаёт платёж и возвращает объект ЮKassa (нужен confirmation_url).
+
+        ``idempotence_key`` — ключ идемпотентности ЮKassa: повторный запрос с тем
+        же ключом возвращает уже созданный платёж, а не создаёт новый.
+        ``ttl_seconds`` — сколько времени счёт остаётся оплачиваемым.
+        """
         payload: dict[str, Any] = {
             "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
             "capture": True,
@@ -66,6 +73,9 @@ class YooKassaClient:
             "description": description[:128],
             "metadata": {k: str(v) for k, v in metadata.items()},
         }
+        if ttl_seconds:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            payload["expires_at"] = expires_at.isoformat(timespec="seconds").replace("+00:00", "Z")
         if payment_method == "sbp":
             payload["payment_method_data"] = {"type": "sbp"}
         session = await self._get_session()
@@ -112,6 +122,20 @@ class YooKassaClient:
                             payment.get("id", "?"), value, expected_amount)
                 return False
         return True
+
+    @staticmethod
+    def payment_is_done(payment: dict[str, Any]) -> bool:
+        """Проведённый платёж: ``succeeded`` (или уже ``canceled``/``refunded``).
+
+        Такой платёж нельзя «перевыпустить»: счёт считается закрытым, и заказу
+        нужно выставить новый.
+        """
+        return payment.get("status") in ("succeeded", "canceled", "refunded")
+
+    @staticmethod
+    def payment_is_payable(payment: dict[str, Any]) -> bool:
+        """Платёж ещё можно оплатить (``waiting_for_capture`` / ``pending``)."""
+        return payment.get("status") in ("waiting_for_capture", "pending")
 
     async def is_paid(self, payment_id: str, expected_amount: int | None = None) -> bool:
         """Проверяет платёж напрямую в API — единственный надёжный способ

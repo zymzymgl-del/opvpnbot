@@ -95,9 +95,7 @@ async def start_webhook_server(cfg: Config, db: Database, bot: Bot, yk: YooKassa
             # Прочие события просто подтверждаем.
             return web.Response(status=200, text="ignored")
 
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE payment_id = ? ORDER BY id DESC LIMIT 1", (payment_id,)
-        )
+        order = await db.order_by_payment(payment_id)
         if order is None:
             log.warning("Платёж %s не привязан ни к одному заказу", payment_id)
             return web.Response(status=200, text="unknown payment")
