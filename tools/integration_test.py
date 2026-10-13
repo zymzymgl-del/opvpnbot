@@ -43,6 +43,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User  # noqa: E4
 
 from app.config import load_config  # noqa: E402
 from app.db import Database, to_iso, utcnow  # noqa: E402
+from app.services.payments import YooKassaClient  # noqa: E402
 from app.runtime import runtime as rt  # noqa: E402
 from bot import build_dispatcher  # noqa: E402
 
@@ -182,13 +183,28 @@ async def run() -> None:
     class FakeYooKassa:
         """Заглушка ЮKassa: платёж создаётся, проверка всегда успешна."""
 
-        async def create_payment(self, *, amount_rub, description, metadata):
-            return {"id": "pay-test", "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
+        def __init__(self) -> None:
+            self.created = 0
+
+        async def create_payment(self, *, amount_rub, description, metadata,
+                                 idempotence_key=None, payment_method=None, ttl_seconds=None):
+            self.created += 1
+            return {"id": "pay-test", "status": "pending",
+                    "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
+
+        async def get_payment(self, payment_id):
+            return {"id": payment_id, "status": "pending", "paid": False,
+                    "amount": {"value": "150.00", "currency": "RUB"},
+                    "confirmation": {"confirmation_url": "https://yookassa.ru/checkout/test"}}
 
         async def is_paid(self, payment_id, expected_amount=None):
             return True
 
-    dp = build_dispatcher(cfg, db, bot, FakeYooKassa())
+        payment_is_valid = staticmethod(YooKassaClient.payment_is_valid)
+        payment_is_payable = staticmethod(YooKassaClient.payment_is_payable)
+
+    yk_stub = FakeYooKassa()
+    dp = build_dispatcher(cfg, db, bot, yk_stub)
     dp["bot_username"] = "opvpnbot_test_bot"
 
     print("\n1. Пользовательский поток")
