@@ -21,7 +21,7 @@ from aiogram.types import (
     Message,
 )
 
-from app import __author__, __author_url__, __repo__, __version__
+from app import __author__, __author_url__, __build__, __repo__, __version__
 from app.config import Config
 from app.db import Database, to_iso, utcnow
 from app.keyboards import (
@@ -114,8 +114,11 @@ async def cb_admin_panel(call: CallbackQuery, db: Database, cfg: Config) -> None
 
 @router.callback_query(F.data == "adm:about")
 async def cb_about(call: CallbackQuery, cfg: Config) -> None:
+    # Версию показываем всегда, сборку — только когда она отличается от semver
+    # (в релизной сборке это лишний шум, в дев/деплое — нужная информация).
+    build = "" if __build__ == __version__ else f" · сборка <code>{esc(__build__)}</code>"
     await call.message.edit_text(
-        f"ℹ️ <b>{esc(cfg.bot_name)}</b> v{__version__}\n\n"
+        f"ℹ️ <b>{esc(cfg.bot_name)}</b> v{esc(__version__)}{build}\n\n"
         f"🧩 Основа: DF VPN Bot, автор <a href=\"{__author_url__}\">@{__author__}</a>\n"
         "Стек: aiogram 3, SQLite, aiohttp\n"
         f"Панель выдачи: <code>{cfg.panel}</code>\n"

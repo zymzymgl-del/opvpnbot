@@ -18,7 +18,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from app import __version__
+from app import __build__, __version__
 from app.config import Config
 from app.db import Database
 
@@ -36,10 +36,12 @@ def build_health_app(db: Database) -> web.Application:
         except Exception as exc:  # noqa: BLE001
             log.warning("healthcheck: БД недоступна: %s", exc)
             return web.json_response(
-                {"ok": False, "db": "error", "version": __version__},
+                {"ok": False, "db": "error", "version": __version__, "build": __build__},
                 status=503,
             )
-        return web.json_response({"ok": True, "db": "ok", "version": __version__})
+        return web.json_response(
+            {"ok": True, "db": "ok", "version": __version__, "build": __build__}
+        )
 
     app = web.Application()
     app.router.add_get("/healthz", handle_health)

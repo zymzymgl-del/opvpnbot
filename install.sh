@@ -189,7 +189,12 @@ set_env() {
   # set_env FILE KEY VALUE  — заменяет строку KEY=... либо добавляет её в конец
   local __f="$1" __k="$2" __v="$3" __tmp
   __tmp="$(mktemp)"
-  awk -v k="$__k" -v v="$__v" 'BEGIN{FS="="} $1==k{print k"="v; next} {print}' "$__f" > "$__tmp"
+  awk -v k="$__k" -v v="$__v" '
+    BEGIN { FS = "="; found = 0 }
+    $1 == k { print k "=" v; found = 1; next }
+    { print }
+    END { if (!found) print k "=" v }
+  ' "$__f" > "$__tmp"
   mv "$__tmp" "$__f"
 }
 
@@ -371,6 +376,26 @@ setup_venv() {
   info "Обновляю pip и устанавливаю зависимости..."
   "$VENV/bin/python" -m pip install --upgrade pip >/dev/null
   "$VENV/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
+}
+
+# --- версия сборки ----------------------------------------------------------
+git_describe() {
+  # git_describe КАТАЛОГ — тег/коммиты/хеш (+-dirty), пусто если нет .git/git.
+  local dir="$1"
+  have git || return 0
+  [ -d "$dir/.git" ] || return 0
+  git -C "$dir" describe --tags --always --dirty 2>/dev/null || true
+}
+
+pin_version() {
+  # Прописывает APP_VERSION в .env — чтобы «О боте» и /healthz показывали
+  # конкретную сборку (в каталоге установки .git обычно нет).
+  local ver=""
+  ver="$(git_describe "$SCRIPT_DIR")"
+  [ -n "$ver" ] || ver="$(git_describe "$INSTALL_DIR")"
+  [ -n "$ver" ] || return 0
+  set_env "$INSTALL_DIR/.env" APP_VERSION "$ver"
+  info "Версия сборки: ${ver}"
 }
 
 # --- nginx / firewall / проверка --------------------------------------------
@@ -591,6 +616,8 @@ main() {
     collect_config
     write_env
   fi
+
+  pin_version
 
   if [ "$NO_SERVICE" -eq 1 ]; then
     ok "Установка завершена (без systemd)."

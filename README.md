@@ -218,6 +218,7 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |
 | `HEALTH_ENABLED`, `HEALTH_HOST`, `HEALTH_PORT`     | HTTP-эндпоинт `GET /healthz` для внешнего мониторинга (uptime)                               |
+| `APP_VERSION`                                      | Версия сборки для «О боте» и `/healthz` (пусто — вычислим из git; `install.sh`/Docker проставляют сами) |
 | `NOTIFY_DAYS_BEFORE`                               | За сколько дней напоминать: по умолчанию `3,1`                                               |
 | `AUTO_DISABLE_EXPIRED`                             | Отключать клиента в панели при истечении подписки                                            |
 
@@ -328,6 +329,8 @@ docs/                      инструкции, архитектура, runbook
 **Нужен ли домен?** Для мгновенных вебхуков ЮKassa — да (и его настроит установщик: `sudo bash install.sh --domain bot.example.com --email you@example.com`). Без домена бот тоже работает: сам проверяет оплату каждые 3 минуты, а пользователь может нажать «🔄 Проверить оплату».
 
 **Как обновить бота?** `sudo bash install.sh --update` (код скачается заново, `.env` и база сохранятся) или `git pull && systemctl restart opvpnbot`.
+
+**Как узнать, какая сборка задеплоена?** `/healthz` отдаёт поле `build`, а «О боте» в админке показывает версию и сборку. В git-рабочей копии версия вычисляется автоматически (`git describe`), в `install.sh`/Docker — через переменную `APP_VERSION` (установщик проставляет её в `.env`).
 
 **Как забэкапить базу?** `/admin` → 💾 Бэкап базы — бот пришлёт файл SQLite. Данные и логи лежат в `data/`.
 

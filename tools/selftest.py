@@ -43,6 +43,7 @@ os.environ.update({
     "LOG_FILE": str(Path(TMP) / "bot.log"),
 })
 
+from app import __build__  # noqa: E402
 from app.config import load_config, validate  # noqa: E402
 from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
 from app.keyboards import admin_service_kb, main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
@@ -166,6 +167,7 @@ async def run() -> None:
     print("\n1. Конфигурация и БД")
     problems = validate(cfg)
     check("конфиг валиден", problems == [], "; ".join(problems))
+    check("версия сборки определена", bool(__build__) and " " not in __build__, __build__)
     db = Database(cfg.db_path)
     await db.connect()
     await rt.load(db, cfg)

@@ -25,7 +25,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from app import __author__, __author_url__, __version__
+from app import __author__, __author_url__, __build__
 from app.config import load_config, validate
 from app.db import Database
 from app.handlers import admin as admin_handlers
@@ -117,7 +117,7 @@ async def main() -> None:
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
-    log.info("Бот @%s (id=%s), версия %s; основа — DF VPN Bot (@%s, %s)", me.username, me.id, __version__, __author__, __author_url__)
+    log.info("Бот @%s (id=%s), версия %s; основа — DF VPN Bot (@%s, %s)", me.username, me.id, __build__, __author__, __author_url__)
 
     yk = YooKassaClient(cfg) if cfg.yookassa_enabled else None
     if cfg.yookassa_enabled:
@@ -167,7 +167,7 @@ async def main() -> None:
     await set_commands(bot)
     await notify_admins(
         bot, cfg,
-        f"🚀 <b>Бот запущен</b> (v{__version__})\n\n"
+        f"🚀 <b>Бот запущен</b> (v{__build__})\n\n"
         f"Оплата: <code>{', '.join(cfg.payment_methods)}</code>",
     )
 

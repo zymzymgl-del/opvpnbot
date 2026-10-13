@@ -125,4 +125,5 @@ requirements-dev.txt       — инструменты разработки (ruff
 - Любая правка — после `python tools/selftest.py` (71 проверка) и `python tools/integration_test.py`.
 - Новые кнопки: колбэк ≤ 64 байт, префикс `домен:действие[:arg]`; новые префиксы добавлять в соответствующий Router раньше catch-all.
 - Новые поля БД: миграция через `ALTER TABLE ... ADD COLUMN` внутри `Database.connect()` (idempotent), плюс белый список в `set_user_field/update_subscription`.
+- Версия: `app.__version__` — semver-релиз, бампается вручную (`git tag vX.Y.Z`); фактическая сборка — `app.__build__` (env `APP_VERSION` → `git describe` → `__version__`). Значение читается на импорте, поэтому env должен быть установлен до старта процесса (systemd `EnvironmentFile`, Docker `ENV`); `install.sh` пишет `APP_VERSION` в `.env` при каждом запуске, включая `--update`.
 - Деньги: любые изменения списаний/начислений — только через `Database` +Ideмпотентность `complete_order` сохранять обязательно.

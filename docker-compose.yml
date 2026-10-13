@@ -8,7 +8,12 @@
 # поэтому переживают пересоздание контейнера.
 services:
   opvpnbot:
-    build: .
+    build:
+      context: .
+      args:
+        # Версию сборки можно передать снаружи (в образе нет .git):
+        #   APP_VERSION=$(git describe --tags --always --dirty) docker compose up -d --build
+        APP_VERSION: ${APP_VERSION:-}
     image: opvpn:latest
     container_name: opvpnbot
     restart: unless-stopped

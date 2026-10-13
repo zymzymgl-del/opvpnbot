@@ -8,6 +8,15 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Версия сборки. В образе нет .git, поэтому app.__build__ берёт её из этого ENV.
+# Пробросить при сборке:
+#   docker build --build-arg APP_VERSION=$(git describe --tags --always --dirty) -t opvpn .
+ARG APP_VERSION=""
+ENV APP_VERSION=${APP_VERSION}
+LABEL org.opencontainers.image.title="OPVPN" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/zymzymgl-del/opvpnbot"
+
 WORKDIR /app
 
 # tini — корректная обработка сигналов/зонтичный процесс (важно для graceful shutdown),
