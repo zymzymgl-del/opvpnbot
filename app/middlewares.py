@@ -40,7 +40,9 @@ class ThrottlingMiddleware(BaseMiddleware):
         last = self._last.get(user.id, 0.0)
         if now - last < self.rate:
             if isinstance(event, CallbackQuery):
-                await event.answer("⏳ Слишком быстро, подождите секунду.", show_alert=False)
+                # Ответ может не успеть: апдейт мог пролежать в очереди, пока бот
+                # был занят, — Telegram тогда отклоняет его как «устаревший».
+                await ui.safe_answer(event, "⏳ Слишком быстро, подождите секунду.", show_alert=False)
             return None
         self._last[user.id] = now
         if len(self._last) > 20000:  # защита от роста памяти
@@ -65,7 +67,7 @@ class UserMiddleware(BaseMiddleware):
         )
         if row["is_banned"] and not self.cfg.is_admin(user.id):
             if isinstance(event, CallbackQuery):
-                await event.answer("🚫 Доступ ограничен администратором.", show_alert=True)
+                await ui.safe_answer(event, "🚫 Доступ ограничен администратором.", show_alert=True)
             elif isinstance(event, Message):
                 await event.answer("🚫 Ваш доступ к боту ограничен.")
             return None
@@ -128,7 +130,7 @@ class RequiredChannelMiddleware(BaseMiddleware):
         markup = subscription_check_kb(self.cfg.required_channels)
         if isinstance(event, CallbackQuery):
             await ui.ui_text_from_message(data["bot"], event.message, text, markup)
-            await event.answer()
+            await ui.safe_answer(event)
         elif isinstance(event, Message):
             await ui.ui_text(data["bot"], event.chat.id, text, markup)
         return None
@@ -145,6 +147,12 @@ class ErrorsMiddleware(BaseMiddleware):
             try:
                 return await handler(event, data)
             except Exception as exc:  # noqa: BLE001
+                if ui.is_stale_query_error(exc):
+                    # Ответ на нажатие не успел (панель/ЮKassa/отправка файла заняли
+                    # больше ~30 с) или по этому запросу уже отвечали — это не ошибка
+                    # бота: нажатие обработано, админов будить не нужно.
+                    log.info("Пропущен поздний/повторный ответ на callback-запрос: %s", exc)
+                    return None
                 log.exception("Ошибка обработки апдейта: %s", exc)
                 bot = data.get("bot")
                 if bot is not None:
@@ -154,8 +162,6 @@ class ErrorsMiddleware(BaseMiddleware):
                         f"rid: <code>{current_request_id()}</code>",
                     )
                 if isinstance(event, CallbackQuery):
-                    try:
-                        await event.answer("⚠️ Произошла ошибка, попробуйте ещё раз.", show_alert=True)
-                    except Exception:
-                        pass
+                    # Отвечаем «safe»: хендлер мог уже ответить раньше.
+                    await ui.safe_answer(event, "⚠️ Произошла ошибка, попробуйте ещё раз.", show_alert=True)
                 return None

@@ -13,6 +13,10 @@
 
 Окна помнятся только в рамках процесса: после рестарта бота первое сообщение
 просто отправится заново — это безопасно.
+
+Здесь же живёт :func:`safe_answer` — безопасный ответ на callback-запрос
+(Telegram отклоняет ответ, отправленный позже ~30 с после нажатия, и это не
+ошибка бота).
 """
 
 from __future__ import annotations
@@ -21,11 +25,51 @@ import logging
 from typing import Any
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 log = logging.getLogger(__name__)
 
 #: chat_id -> message_id последнего «окна» в этом чате.
 _windows: dict[int, int] = {}
+
+#: Маркеры ответа Telegram «ответить на это нажатие уже нельзя».
+_STALE_QUERY_MARKERS = ("query is too old", "query id is invalid")
+
+
+def is_stale_query_error(exc: BaseException) -> bool:
+    """True, если ошибка означает «ответ на нажатие уже невозможен».
+
+    Telegram отвечает ``Bad Request: query is too old and response timeout
+    expired or query ID is invalid``, когда ответ отправлен позже ~30 с после
+    нажатия **или** по этому запросу уже отвечали (повторный ответ).
+    Реагировать нечем: нажатие обработано, окно пользователю уже показано.
+    Это не ошибка бота и не повод будить админов уведомлением.
+    """
+    if not isinstance(exc, TelegramBadRequest):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _STALE_QUERY_MARKERS)
+
+
+async def safe_answer(call: Any, text: str | None = None, **kwargs: Any) -> bool:
+    """Отвечает на callback-запрос, не падая на «устаревшем» query.
+
+    Обычный ``await call.answer(...)`` после долгой работы (запросы в панель
+    3x-ui, ЮKassa, отправка файла БД) падает с ``TelegramBadRequest: query is
+    too old…``. Здесь такая ошибка только логируется (debug) — нажатие уже
+    обработано, а ронять хендлер незачем. Прочие ошибки Telegram пробрасываются.
+    """
+    try:
+        if text is None:
+            await call.answer(**kwargs)
+        else:
+            await call.answer(text, **kwargs)
+        return True
+    except TelegramBadRequest as exc:
+        if is_stale_query_error(exc):
+            log.debug("Ответ на устаревший callback-запрос пропущен: %s", exc)
+            return False
+        raise
 
 
 def remember(chat_id: int, message_id: int) -> None:

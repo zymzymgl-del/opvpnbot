@@ -631,15 +631,25 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         return
     amount = int(order["amount"])
 
+    # Отвечаем на нажатие СРАЗУ: дальше идут запросы в ЮKassa и выдача в панели
+    # (до 15–20 с на каждый), а Telegram отклоняет ответ, отправленный позже ~30 с
+    # («query is too old…»). Спиннер гаснет сразу, а все результаты — в едином окне.
+    await ui.safe_answer(call)
+
     if action == "check":
         if needs_regrant:
             try:
                 await complete_order(bot, cfg, db, order_id, payment_id=order["payment_id"])
             except PanelError as exc:
-                await call.answer(f"Выдача не удалась: {exc}. Повторим автоматически.", show_alert=True)
+                await _edit_or_answer(
+                    call,
+                    f"⚠️ Выдача не удалась: {esc(exc)}\n\nПовторим автоматически — "
+                    "период появится в течение пары минут.",
+                    back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                )
                 return
-            await _edit_or_answer(call, "✅ Подписка выдана! Ключ отправлен отдельным сообщением.")
-            await call.answer()
+            await _edit_or_answer(call, "✅ Подписка выдана! Ключ отправлен отдельным сообщением.",
+                                  back_kb())
             return
         paid_id: str | None = None
         if yk is not None:
@@ -651,17 +661,29 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             try:
                 await complete_order(bot, cfg, db, order_id, payment_id=paid_id)
             except PanelError as exc:
-                await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                await _edit_or_answer(
+                    call,
+                    f"⚠️ Оплата прошла, но выдача задержалась: {esc(exc)}\n\n"
+                    "Повторим автоматически — заказ не потеряется.",
+                    back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                )
                 return
-            await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
+            await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
+                                  back_kb())
         else:
-            await call.answer("Платёж пока не подтверждён. Оплатите по ссылке или подождите пару минут.",
-                              show_alert=True)
+            await _edit_or_answer(
+                call,
+                "⏳ <b>Платёж пока не подтверждён</b>\n\n"
+                "Оплатите по ссылке или подождите пару минут и нажмите «🔄 Проверить оплату» снова.",
+                checkout_kb(order["payment_url"], order_id) if order["payment_url"]
+                else back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+            )
         return
 
     if action == "yookassa":
         if yk is None:
-            await call.answer("Оплата картой временно недоступна, выберите другой способ.", show_alert=True)
+            await _edit_or_answer(call, "⚠️ Оплата картой временно недоступна, попробуйте позже.",
+                                  back_kb(f"order:show:{order_id}", "◀️ К заказу"))
             return
         # 1) Любой из ранее выставленных счетов заказа уже оплачен? (история в
         #    orders.payment_ids) — тогда выдаём доступ, новый счёт не создаём.
@@ -672,17 +694,25 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 existing = await yk.get_payment(pid)
             except PaymentError as exc:
                 log.warning("Заказ #%s: не удалось прочитать счёт %s: %s", order_id, pid, exc)
-                await call.answer("⏳ Не удалось проверить оплату. Попробуйте через минуту.",
-                                  show_alert=True)
+                await _edit_or_answer(
+                    call,
+                    "⏳ Не удалось проверить оплату — попробуйте через минуту.",
+                    back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                )
                 return
             if yk.payment_is_valid(existing, amount):
                 try:
                     await complete_order(bot, cfg, db, order_id, payment_id=pid)
                 except PanelError as exc:
-                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    await _edit_or_answer(
+                        call,
+                        f"⚠️ Оплата прошла, но выдача задержалась: {esc(exc)}\n\n"
+                        "Повторим автоматически — заказ не потеряется.",
+                        back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                    )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
-                await call.answer()
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
+                                      back_kb())
                 return
         # Один заказ — один счёт: если у заказа уже есть привязанный платёж,
         # переспрашиваем его статус в API и переиспользуем ту же ссылку.
@@ -695,7 +725,11 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 payment = await yk.get_payment(order["payment_id"])
             except PaymentError as exc:
                 log.warning("ЮKassa: статус счёта заказа #%s неизвестен: %s", order_id, exc)
-                await call.answer("ЮKassa временно недоступна, попробуйте позже.", show_alert=True)
+                await _edit_or_answer(
+                    call,
+                    "⚠️ ЮKassa временно недоступна — попробуйте через минуту.",
+                    back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                )
                 return
             if yk.payment_is_valid(payment, amount):
                 # Платёж уже прошёл, но выдача не состоялась (вебхук потерян) —
@@ -703,10 +737,15 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 try:
                     await complete_order(bot, cfg, db, order_id, payment_id=order["payment_id"])
                 except PanelError as exc:
-                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    await _edit_or_answer(
+                        call,
+                        f"⚠️ Оплата прошла, но выдача задержалась: {esc(exc)}\n\n"
+                        "Повторим автоматически — заказ не потеряется.",
+                        back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                    )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
-                await call.answer("Оплата найдена")
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
+                                      back_kb())
                 return
             if yk.payment_is_payable(payment):
                 stored_url = order["payment_url"] or ""
@@ -714,8 +753,8 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                     stored_url = (payment.get("confirmation") or {}).get("confirmation_url", "")
                     if stored_url:  # чиним старые заказы, где ссылка не сохранилась
                         await db.claim_order_invoice(order_id, order["payment_id"], stored_url)
+                # Счёт тот же — показываем окно оплаты с прежней ссылкой.
                 await _render_checkout(call, cfg, order_id, amount, stored_url)
-                await call.answer("Счёт уже создан — оплата по той же ссылке", show_alert=True)
                 return
             # Счёт отменён/истёк — освобождаем слот и выпускаем новый.
             await db.release_order_invoice(order_id)
@@ -737,7 +776,11 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             )
         except PaymentError as exc:
             log.error("ЮKassa: %s", exc)
-            await call.answer("Не удалось создать платёж, попробуйте позже.", show_alert=True)
+            await _edit_or_answer(
+                call,
+                "❌ Не удалось создать платёж — попробуйте позже или напишите в поддержку.",
+                back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+            )
             await notify_admins(bot, cfg, f"⚠️ Ошибка ЮKassa по заказу #{order_id}: {esc(exc)}")
             return
         url = (payment.get("confirmation") or {}).get("confirmation_url", "")
@@ -750,20 +793,22 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 try:
                     await complete_order(bot, cfg, db, order_id, payment_id=fresh["payment_id"])
                 except PanelError as exc:
-                    await call.answer(f"Оплата прошла, но выдача задержалась: {exc}", show_alert=True)
+                    await _edit_or_answer(
+                        call,
+                        f"⚠️ Оплата прошла, но выдача задержалась: {esc(exc)}\n\n"
+                        "Повторим автоматически — заказ не потеряется.",
+                        back_kb(f"order:show:{order_id}", "◀️ К заказу"),
+                    )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.")
-                await call.answer()
+                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
+                                      back_kb())
                 return
+            # Гонка: чужой клик уже привязал счёт — показываем ту же ссылку.
             await _render_checkout(call, cfg, order_id, amount,
                                    (fresh["payment_url"] if fresh else "") or url)
-            await call.answer("Счёт уже создан — оплата по той же ссылке", show_alert=True)
             return
         await _render_checkout(call, cfg, order_id, amount, url)
-        await call.answer("Счёт создан")
         return
-
-    await call.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1003,10 @@ async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> 
                               back_kb("menu:buy", "🛒 Купить VPN"))
         await call.answer()
         return
+    # Отвечаем на нажатие СРАЗУ: выдача ключа в панели занимает десятки секунд,
+    # а Telegram отклоняет ответ позже ~30 с («query is too old…»). Результат
+    # пользователь видит в том же окне — карточкой подписки.
+    await ui.safe_answer(call)
     try:
         await grant_subscription(bot, cfg, db, call.from_user.id, "trial")
     except PanelError as exc:
@@ -966,13 +1015,11 @@ async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> 
         await _edit_or_answer(call, f"⚠️ Не удалось выдать пробный доступ: {esc(exc)}\nНапишите в поддержку.",
                               back_kb("menu:support", "🆘 Поддержка"))
         await notify_admins(bot, cfg, f"⚠️ Пробный доступ не выдан <code>{call.from_user.id}</code>: {esc(exc)}")
-        await call.answer()
         return
     except Exception:
         await db.set_user_field(call.from_user.id, "trial_used", 0)
         raise
     await notify_admins(bot, cfg, f"🎁 Пробный период выдан <code>{call.from_user.id}</code>")
-    await call.answer("Пробный период выдан 🎁")
 
 
 # ---------------------------------------------------------------------------

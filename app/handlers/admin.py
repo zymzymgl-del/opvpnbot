@@ -50,6 +50,7 @@ from app.services.subs import (
     reissue_subscription,
     safe_send,
 )
+from app.ui import safe_answer
 from app.utils import STATUS_RU, chunks, esc, fmt_dt, human_left, make_qr_png, price
 
 log = logging.getLogger(__name__)
@@ -218,19 +219,27 @@ async def cb_svc_ask_xray(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "adm:svc:do:xray")
 async def cb_svc_do_xray(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
+    # Отвечаем СРАЗУ: перезапуск Xray через панель может занять до 20 с, а Telegram
+    # отклоняет ответ позже ~30 с («query is too old…»). Результат — правкой окна.
+    await safe_answer(call)
     panel = get_panel(cfg, db)
     try:
         await panel.restart_xray()
     except PanelError as exc:
-        await call.answer(f"Не удалось перезапустить Xray: {exc}", show_alert=True)
+        await call.message.edit_text(
+            f"⚠️ Не удалось перезапустить Xray: {esc(exc)}",
+            reply_markup=back_kb("adm:svc", "◀️ К обслуживанию"),
+        )
         return
     except Exception as exc:  # noqa: BLE001
         log.warning("Ошибка перезапуска Xray: %s", exc)
-        await call.answer("Ошибка перезапуска Xray, смотрите логи.", show_alert=True)
+        await call.message.edit_text(
+            "⚠️ Ошибка перезапуска Xray, смотрите логи.",
+            reply_markup=back_kb("adm:svc", "◀️ К обслуживанию"),
+        )
         return
     await call.message.edit_text("♻️ <b>Xray перезапущен.</b>",
                                  reply_markup=back_kb("adm:svc", "◀️ К обслуживанию"))
-    await call.answer("Готово")
     await notify_admins(bot, cfg, f"♻️ Xray перезапущен админом <code>{call.from_user.id}</code>.")
 
 
@@ -246,13 +255,14 @@ async def cb_svc_do_bot(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "adm:backup")
 async def cb_backup(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    # Отвечаем СРАЗУ: загрузка файла БД на серверы Telegram может занять больше
+    # 30 с (особенно с WAL-файлами), а поздний ответ Telegram отклоняет.
+    await safe_answer(call, "Готовлю файл…")
     try:
         document = FSInputFile(cfg.db_path, filename=f"opvpnbot-backup-{utcnow():%Y%m%d-%H%M}.sqlite3")
         await call.message.answer_document(document, caption="💾 Резервная копия базы данных")
     except Exception as exc:
-        await call.answer(f"Не удалось отправить файл: {exc}", show_alert=True)
-        return
-    await call.answer("Готово")
+        await call.message.answer(f"⚠️ Не удалось отправить файл: {exc}")
 
 
 # ---------------------------------------------------------------------------
