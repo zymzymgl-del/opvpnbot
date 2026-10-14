@@ -10,6 +10,7 @@ from typing import Optional
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Config
 from app.db import Database, from_iso, to_iso, utcnow
@@ -196,12 +197,10 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
                 traffic_gb=merged_traffic,
                 plan_code=shown_plan,
             )
-            refreshed = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (reuse["id"],))
+            refreshed = await db.get_subscription(int(reuse["id"]))
             if notify:
                 traffic_label = "безлимит" if not merged_traffic else f"{merged_traffic} ГБ"
                 header = "Подписка возобновлена" if reactivating else "Подписка продлена"
-                from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
                 await ui.ui_text(
                     bot, user_id,
                     f"✅ <b>{header} до {fmt_dt(new_expires)}</b> (+{days} дн.)\n"
@@ -237,7 +236,7 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
             db, int(reuse["id"]), issued, shown_plan=shown_plan,
             devices=new_devices, traffic_gb=new_traffic, expires_at=new_expires,
         )
-        refreshed = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(reuse["id"]),))
+        refreshed = await db.get_subscription(int(reuse["id"]))
         if notify:
             await send_subscription_card(
                 bot, cfg, db, user_id, refreshed,
@@ -278,7 +277,7 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
             devices=devices or 1, traffic_gb=traffic_gb or 0, expires_at=expires_at,
         )
         sub_id = int(existing["id"])
-    row = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+    row = await db.get_subscription(int(sub_id))
     if notify:
         # Только карточка подписки: QR — по кнопке, главное меню — по кнопке «📋 Все подписки».
         await send_subscription_card(bot, cfg, db, user_id, row)
@@ -455,8 +454,6 @@ async def send_reminders(bot: Bot, cfg: Config, db: Database) -> None:
             if left_hours <= days * 24 and marker not in notified:
                 notified.add(marker)
                 await db.update_subscription(sub["id"], notified=",".join(sorted(notified)))
-                from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
                 markup = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text="🔄 Продлить подписку", callback_data=f"sub:renew:{sub['id']}")
                 ]])
