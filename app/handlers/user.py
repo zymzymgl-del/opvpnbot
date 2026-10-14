@@ -103,8 +103,15 @@ async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
     await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
 
 
-async def _send_menu_window(bot: Bot, message: Message, text: str, cfg: Config) -> None:
-    """Показывает окно меню с инлайн-кнопками в едином окне чата."""
+async def _send_menu_window(bot: Bot, message: Message, text: str, cfg: Config,
+                            new_window: bool = False) -> None:
+    """Показывает окно меню с инлайн-кнопками в едином окне чата.
+
+    При ``new_window=True`` (команда /start) старое окно забывается и меню
+    отправляется новым сообщением, а не редактирует прошлое окно.
+    """
+    if new_window:
+        ui.forget(int(message.chat.id))
     await ui.ui_text(
         bot, message.chat.id, text,
         main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
@@ -165,7 +172,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
 
         result = await bind_claim(bot, cfg, db, user.id, payload[len(CLAIM_PREFIX):])
         prefix = "🎉 " if result.ok else "⚠️ "
-        await _send_menu_window(bot, message, prefix + esc(result.message), cfg)
+        await _send_menu_window(bot, message, prefix + esc(result.message), cfg, new_window=True)
         return
 
     tail = "Все покупки — в «🔑 Моя подписка», профиль — в «👤 Профиль», вопросы — «🆘 Поддержка». Меню ниже 👇"
@@ -180,7 +187,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     sub = await db.active_subscription(user.id)
     if sub is not None:
         greeting += f"\n🟢 Ваша подписка активна, осталось <b>{human_left(sub['expires_at'])}</b>."
-    await _send_menu_window(bot, message, greeting, cfg)
+    await _send_menu_window(bot, message, greeting, cfg, new_window=True)
 
 
 @router.message(Command("menu"))

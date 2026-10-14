@@ -196,12 +196,10 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
                 traffic_gb=merged_traffic,
                 plan_code=shown_plan,
             )
-            refreshed = await db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (reuse["id"],))
+            refreshed = await db.get_subscription(int(reuse["id"]))
             if notify:
                 traffic_label = "безлимит" if not merged_traffic else f"{merged_traffic} ГБ"
                 header = "Подписка возобновлена" if reactivating else "Подписка продлена"
-                from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
                 await ui.ui_text(
                     bot, user_id,
                     f"✅ <b>{header} до {fmt_dt(new_expires)}</b> (+{days} дн.)\n"
