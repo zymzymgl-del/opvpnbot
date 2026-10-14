@@ -724,13 +724,15 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                 amount_rub=amount,
                 description=f"VPN {order['plan_code']} (заказ #{order_id})",
                 metadata={"order_id": order_id, "user_id": call.from_user.id},
-                # Уникальный ключ на каждую попытку: раньше использовался
-                # детерминированный f"order-{order_id}-amt-{amount}", и после
-                # отмены/истечения счёта ЮKassa отказывала пересозданию тем же
-                # ключом в течение 24 часов (HTTP 400 "idempotence key already
-                # used"). Гонку параллельных кликов при этом по-прежнему гасит
-                # claim_order_invoice + проверка payment_is_payable выше.
-                idempotence_key=f"order-{order_id}-amt-{amount}-{uuid.uuid4()}",
+                # Ключ уникален на каждую попытку создания счёта: после
+                # отмены/истечения счёта ЮKassa отвергает повторное использование
+                # того же Idempotence-Key в течение 24 часов (HTTP 400
+                # "idempotence key already used"). Гонку параллельных кликов
+                # гасит не ключ, а БД: claim_order_invoice + payment_is_payable
+                # выше. Если ответ ЮKassa потерялся в сети, счёт просто остаётся
+                # «сиротой» в ЮKassa и истекает по ttl — заказ не помечается
+                # оплаченным без реального платежа.
+                idempotence_key=f"order-{order_id}-{uuid.uuid4().hex}",
                 ttl_seconds=max(60, cfg.invoice_ttl_minutes * 60),
             )
         except PaymentError as exc:
