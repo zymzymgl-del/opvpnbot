@@ -53,6 +53,7 @@ from app.services.panels import (  # noqa: E402
     BasePanel,
     ClaimedClient,
     IssuedKey,
+    PanelError,
     XuiPanel,
     _as_dict,
     _build_link,
@@ -65,6 +66,7 @@ from app.services.subs import (  # noqa: E402
     complete_order,
     grant_subscription,
     process_expired,
+    reissue_subscription,
     renewal_available,
     send_reminders,
 )
@@ -137,10 +139,16 @@ class FakePanel(BasePanel):
     def __init__(self) -> None:
         self.counter = 0
         self.fail_extend = False
+        self.fail_create = False
+        self.deleted: list[str] = []
+        self.last_days = 0
 
     async def create_client(self, *, user_id: int, days: int, devices: int, traffic_gb: int,
                             plan_code: str) -> IssuedKey:
+        if self.fail_create:
+            raise PanelError("панель недоступна (заглушка)")
         self.counter += 1
+        self.last_days = days
         return IssuedKey(
             vpn_key=f"vless://fake-{user_id}-{self.counter}@example.com:443#k",
             sub_url=None,
@@ -156,6 +164,7 @@ class FakePanel(BasePanel):
         return True
 
     async def delete_client(self, *, panel_username: str) -> bool:
+        self.deleted.append(panel_username)
         return True
 
     async def health(self) -> tuple[bool, str]:
@@ -253,6 +262,45 @@ async def run() -> None:
         panel_username="dup", devices=1, traffic_gb=0, expires_at=utcnow() + timedelta(days=30),
     )
     check("вторую активную подписку блокирует БД", dup == 0, str(dup))
+
+    print("\n2d. Ручная перевыдача админом (срок и тариф сохраняются)")
+    await db.ensure_user(1005, "eve", "Ева")
+    evo_sub = await grant_subscription(bot, cfg, db, 1005, "3m")
+    # Оставим ровно 40 дней: перевыдача должна сохранить срок, а не сбросить его.
+    keep_expires = utcnow() + timedelta(days=40)
+    await db.update_subscription(int(evo_sub["id"]), expires_at=to_iso(keep_expires),
+                                 devices=3, traffic_gb=50)
+    evo_sub = await db.get_subscription(int(evo_sub["id"]))
+    before_msgs = len(bot.messages)
+    res = await reissue_subscription(bot, cfg, db, int(evo_sub["id"]), actor_id=777)
+    check("ручная перевыдача: ok", res["ok"], res.get("error", ""))
+    new_row = await db.get_subscription(int(evo_sub["id"]))
+    check("перевыдача: id подписки тот же (нет второй)", int(new_row["id"]) == int(evo_sub["id"]))
+    check("перевыдача: срок сохранён точно", new_row["expires_at"] == evo_sub["expires_at"],
+          f"{new_row['expires_at']} != {evo_sub['expires_at']}")
+    check("перевыдача: тариф сохранён", new_row["plan_code"] == evo_sub["plan_code"])
+    check("перевыдача: устройства/трафик сохранены",
+          int(new_row["devices"]) == 3 and int(new_row["traffic_gb"]) == 50,
+          f"{new_row['devices']}/{new_row['traffic_gb']}")
+    check("перевыдача: ссылка заменена новой", new_row["vpn_key"] != evo_sub["vpn_key"],
+          new_row["vpn_key"] or "")
+    check("перевыдача: клиент панели создаётся на остаток дней", fake_panel.last_days == 40,
+          str(fake_panel.last_days))
+    check("перевыдача: старый клиент панели удалён", evo_sub["panel_username"] in fake_panel.deleted,
+          str(fake_panel.deleted))
+    user_texts = "\n".join(t for _c, t in bot.messages[before_msgs:])
+    check("перевыдача: пользователь получил уведомление о новой ссылке",
+          "перевыдана вручную" in user_texts and "Новая ссылка" in user_texts)
+    admin_texts = "\n".join(t for c, t in bot.messages[before_msgs:] if c == 777)
+    check("перевыдача: админы уведомлены", "Ручная перевыдача" in admin_texts)
+
+    fake_panel.fail_create = True
+    res_fail = await reissue_subscription(bot, cfg, db, int(evo_sub["id"]))
+    fake_panel.fail_create = False
+    check("перевыдача: отказ панели обработан", not res_fail["ok"] and "Панель отказала" in res_fail["error"])
+    row_after_fail = await db.get_subscription(int(evo_sub["id"]))
+    check("перевыдача: при отказе панели ссылка не тронута",
+          row_after_fail["vpn_key"] == new_row["vpn_key"])
 
     print("\n3. Пробный период")
     trial = await grant_subscription(bot, cfg, db, 1002, "trial")

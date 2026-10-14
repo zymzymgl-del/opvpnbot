@@ -291,6 +291,103 @@ async def grant_subscription(bot: Bot, cfg: Config, db: Database, user_id: int, 
 
 
 # ---------------------------------------------------------------------------
+# Ручная перевыдача (админ)
+# ---------------------------------------------------------------------------
+async def reissue_subscription(bot: Bot, cfg: Config, db: Database, sub_id: int,
+                               *, actor_id: int | None = None) -> dict:
+    """Ручная перевыдача подписки администратором — когда клиент в панели
+    сломан/удалён и старая ссылка не работает.
+
+    Гарантии (главное требование):
+      * срок НЕ меняется — сколько дней оставалось, столько и остаётся;
+      * тариф, устройства и трафик сохраняются как у подписки (конфиг
+        пересоздаётся с теми же параметрами);
+      * создаётся НОВЫЙ клиент панели, его ссылкой заменяется ``vpn_key``/
+        ``sub_url`` в ТОЙ ЖЕ строке подписки — второй подписки не появляется;
+      * старый (сломанный) клиент панели удаляется best-effort.
+
+    Возвращает результат-словарь для админ-обработчика:
+      ``{"ok": True,  "row": <обновлённая подписка>, "old_username": ...,
+         "new_username": ..., "client_deleted": bool}``
+      либо ``{"ok": False, "error": "<текст для админа>"}`` — без изменений.
+    """
+    sub = await db.get_subscription(sub_id)
+    if sub is None:
+        return {"ok": False, "error": f"Подписка #{sub_id} не найдена."}
+
+    panel = get_panel(cfg, db)
+    if sub["panel"] != panel.name:
+        return {
+            "ok": False,
+            "error": (f"Подписка выпущена панелью «{sub['panel']}», а активна «{panel.name}» — "
+                      "перевыдача невозможна (переключите панель или разберитесь вручную)."),
+        }
+
+    expires_at = from_iso(sub["expires_at"])
+    left_days = max(1, (expires_at - utcnow()).days + 1)  # никогда не выдаём конфиг «в никуда»
+
+    # Сначала выпускаем нового клиента: если панель откажет — старая ссылка
+    # останется на месте, подписка не пострадает.
+    try:
+        issued = await panel.create_client(
+            user_id=int(sub["user_id"]), days=left_days,
+            devices=int(sub["devices"] or 1), traffic_gb=int(sub["traffic_gb"] or 0),
+            plan_code=sub["plan_code"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Перевыдача #%s: панель отказала при создании клиента", sub_id)
+        return {"ok": False, "error": f"Панель отказала: {exc}. Старая ссылка не тронута."}
+
+    old_username = sub["panel_username"] or ""
+    await _apply_reissue(
+        db, sub_id, issued, shown_plan=sub["plan_code"],
+        devices=int(sub["devices"] or 1), traffic_gb=int(sub["traffic_gb"] or 0),
+        expires_at=expires_at,
+    )
+    refreshed = await db.get_subscription(sub_id)
+
+    client_deleted = False
+    if old_username:
+        try:
+            client_deleted = bool(await panel.delete_client(panel_username=old_username))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Перевыдача #%s: удалить старого клиента %s не удалось: %s",
+                        sub_id, old_username, exc)
+
+    actor = f" (админ <code>{actor_id}</code>)" if actor_id else ""
+    await safe_send(
+        bot, int(sub["user_id"]),
+        "♻️ <b>Подписка перевыдана вручную</b>\n"
+        "Старый конфиг в панели оказался недоступен — мы выпустили новый.\n"
+        f"Срок действия НЕ изменился: до {fmt_dt(refreshed['expires_at'])} "
+        f"(осталось {human_left(refreshed['expires_at'])}).\n\n"
+        "Переимпортируйте новую ссылку или QR-код ниже.",
+    )
+    await send_subscription_card(
+        bot, cfg, db, int(sub["user_id"]), refreshed,
+        header="🔑 <b>Новая ссылка вашей подписки</b>",
+    )
+    await notify_admins(
+        bot, cfg,
+        f"♻️ <b>Ручная перевыдача подписки #{sub_id}</b>{actor}\n"
+        f"Пользователь: <code>{sub['user_id']}</code> · тариф: {esc(sub['plan_code'])}\n"
+        f"Срок сохранён: до {fmt_dt(refreshed['expires_at'])} "
+        f"(осталось {human_left(refreshed['expires_at'])})\n"
+        f"Клиент панели: <code>{esc(old_username)}</code> → <code>{esc(issued.panel_username)}</code>"
+        f" ({'старый удалён' if client_deleted else 'старый НЕ удалён — проверьте панель'})",
+    )
+    log.info("Перевыдача #%s выполнена: пользователь %s, остаток %d дн.",
+             sub_id, sub["user_id"], left_days)
+    return {
+        "ok": True,
+        "row": refreshed,
+        "old_username": old_username,
+        "new_username": issued.panel_username,
+        "client_deleted": client_deleted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Оплата заказа
 # ---------------------------------------------------------------------------
 #: Локи на заказ: одновременно выдавать/повторять выдачу должен ровно один вызов
