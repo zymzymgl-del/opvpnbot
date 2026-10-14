@@ -100,6 +100,19 @@ async def _edit_or_answer(
     await ui.ui_text_from_message(call.bot, call.message, text, markup)
 
 
+async def _working(call: CallbackQuery, text: str, markup=None) -> None:
+    """Промежуточный статус («⏳ делаю…») в окне перед долгой работой.
+
+    Спиннер на кнопке гаснет сразу — ответ на нажатие отправляется первым же
+    действием. Но дальше идут запросы в ЮKassa (до 15 с на счёт), выдача в
+    панели 3x-ui (до 20 с) и отправка файлов, поэтому пользователю нужен
+    видимый прогресс, а не «замерший» экран.
+    Кнопка возврата в разметке обязательна: если хендлер упадёт после этого
+    шага, окно не останется без выхода.
+    """
+    await _edit_or_answer(call, text, back_kb() if markup is None else markup)
+
+
 async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
     await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
 
@@ -167,6 +180,10 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     if payload.startswith("claim_"):
         from app.services.claims import CLAIM_PREFIX, bind_claim
 
+        # Привязка ищет клиента в панели (до 20 с) — показываем статус, чтобы
+        # пользователь не ждал молча; карточка/QR заменят это же окно.
+        await ui.ui_text(bot, message.chat.id, "⏳ Проверяю ваш конфиг в панели…",
+                         back_kb("menu:main", "🏠 В меню"))
         result = await bind_claim(bot, cfg, db, user.id, payload[len(CLAIM_PREFIX):])
         prefix = "🎉 " if result.ok else "⚠️ "
         await _send_menu_window(bot, message, prefix + esc(result.message), cfg)
@@ -637,6 +654,9 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
     await ui.safe_answer(call)
 
     if action == "check":
+        # Пользователь ждёт: ниже опрос ЮKassa по всем счетам заказа и выдача
+        # в панели — показываем статус в окне до тяжёлой работы.
+        await _working(call, "⏳ Проверяю оплату…", back_kb(f"order:show:{order_id}", "◀️ К заказу"))
         if needs_regrant:
             try:
                 await complete_order(bot, cfg, db, order_id, payment_id=order["payment_id"])
@@ -685,6 +705,12 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             await _edit_or_answer(call, "⚠️ Оплата картой временно недоступна, попробуйте позже.",
                                   back_kb(f"order:show:{order_id}", "◀️ К заказу"))
             return
+        # Повторное нажатие «Оплатить» по заказу, у которого уже есть счёт(а):
+        # сначала переспрашиваем статус в ЮKassa (до 15 с на каждый счёт) —
+        # показываем статус в окне. Первое нажатие (счетов нет) идёт сразу
+        # к созданию счёта, чтобы ссылка появлялась без лишнего мигания.
+        if order["payment_id"] or payment_ids_of(order):
+            await _working(call, "⏳ Проверяю оплату…", back_kb(f"order:show:{order_id}", "◀️ К заказу"))
         # 1) Любой из ранее выставленных счетов заказа уже оплачен? (история в
         #    orders.payment_ids) — тогда выдаём доступ, новый счёт не создаём.
         for pid in payment_ids_of(order):
@@ -1007,6 +1033,7 @@ async def cb_trial(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> 
     # а Telegram отклоняет ответ позже ~30 с («query is too old…»). Результат
     # пользователь видит в том же окне — карточкой подписки.
     await ui.safe_answer(call)
+    await _working(call, "⏳ Создаю доступ…", back_kb("menu:main"))
     try:
         await grant_subscription(bot, cfg, db, call.from_user.id, "trial")
     except PanelError as exc:

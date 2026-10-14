@@ -69,6 +69,22 @@ router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
 
+async def _working(call: CallbackQuery, text: str, markup=None) -> None:
+    """Промежуточный статус («⏳ делаю…») в окне админа перед долгой работой.
+
+    Выдача в панели 3x-ui, проверка панели и перезапуск Xray — сетевые запросы
+    до 20 с. Ответ на нажатие отправляется до работы (спиннер гаснет сразу),
+    а в окне показывается статус с кнопкой возврата: иначе экран выглядит
+    «зависшим», а при падении хендлера останется без выхода.
+    """
+    try:
+        await call.message.edit_text(
+            text, reply_markup=back_kb("adm:panel", "◀️ Назад") if markup is None else markup
+        )
+    except Exception as exc:  # noqa: BLE001 — окно устарело/фото/текст не изменился
+        log.debug("Промежуточный статус не показан: %s", exc)
+
+
 class AdminStates(StatesGroup):
     claim_lookup = State()
     promo_code = State()
@@ -158,13 +174,16 @@ async def cb_stats(call: CallbackQuery, db: Database, cfg: Config) -> None:
 
 @router.callback_query(F.data == "adm:paneltest")
 async def cb_panel_test(call: CallbackQuery, db: Database, cfg: Config) -> None:
+    # Проверка панели — сетевой запрос (до 20 с). Отвечаем сразу и показываем
+    # статус в окне: иначе спиннер «висит», а экран выглядит зависшим.
+    await safe_answer(call)
+    await _working(call, "⏳ Проверяю панель…")
     panel = get_panel(cfg, db)
     ok, message = await panel.health()
     await call.message.answer(
         f"{'✅' if ok else '❌'} <b>Проверка панели</b> (<code>{cfg.panel}</code>)\n\n{esc(message)}",
         reply_markup=back_kb("adm:panel", "◀️ Назад"),
     )
-    await call.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +241,7 @@ async def cb_svc_do_xray(call: CallbackQuery, db: Database, cfg: Config, bot: Bo
     # Отвечаем СРАЗУ: перезапуск Xray через панель может занять до 20 с, а Telegram
     # отклоняет ответ позже ~30 с («query is too old…»). Результат — правкой окна.
     await safe_answer(call)
+    await _working(call, "⏳ Перезапускаю Xray…", back_kb("adm:svc", "◀️ К обслуживанию"))
     panel = get_panel(cfg, db)
     try:
         await panel.restart_xray()
@@ -328,11 +348,17 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
         return
 
     if action in ("approve", "regrant"):
+        # Выдача в панели — до 20 с: отвечаем сразу, статус показываем в окне.
+        await safe_answer(call)
+        await _working(call, "⏳ Выдаю доступ…", back_kb("adm:orders", "◀️ К заказам"))
         try:
             await complete_order(bot, cfg, db, order_id,
                                  payment_id=order["payment_id"] or f"admin:{call.from_user.id}")
         except PanelError as exc:
-            await call.answer(f"Не удалось выдать ключ: {exc}", show_alert=True)
+            await call.message.edit_text(
+                f"⚠️ Не удалось выдать ключ: {esc(exc)}",
+                reply_markup=back_kb("adm:orders", "◀️ К заказам"),
+            )
             return
         await call.message.edit_text(f"✅ Заказ #{order_id} подтверждён, ключ выдан клиенту.")
     else:
@@ -343,7 +369,8 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
         await safe_send(bot, int(order["user_id"]),
                         f"❌ Заказ #{order_id} отклонён администратором. Напишите в поддержку, если это ошибка.")
         await call.message.edit_text(f"❌ Заказ #{order_id} отклонён.")
-    await call.answer()
+    # Ветка выдачи уже ответила выше — safe_answer не упадёт на втором ответе.
+    await safe_answer(call)
 
 
 # ---------------------------------------------------------------------------
@@ -373,24 +400,35 @@ async def msg_claim_lookup(message: Message, state: FSMContext, db: Database, cf
     if not identifier:
         await message.answer("Пустое значение — отправьте subId или email.")
         return
+    # Поиск клиента — запрос в панель (до 20 с): показываем статус и заменяем
+    # его результатом, чтобы админ не ждал молча.
+    progress = await message.answer("⏳ Ищу клиента в панели…")
+
+    async def _reply(text: str, markup=None) -> None:
+        try:
+            await progress.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except Exception as exc:  # noqa: BLE001 — окно устарело: шлём новым сообщением
+            log.debug("Статус поиска клиента не заменён: %s", exc)
+            await message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+
     client = await find_claimable(cfg, db, sub_id=identifier, email=identifier)
     if client is None:
-        await message.answer(
+        await _reply(
             "❌ Клиент не найден в панели. Проверьте subId/email (клиент должен быть в инбаундах панели).",
-            reply_markup=back_kb("adm:panel", "◀️ Назад"),
+            back_kb("adm:panel", "◀️ Назад"),
         )
         return
     existing = await db.subscription_by_panel_username("xui", client.email)
     if existing is not None:
-        await message.answer(
+        await _reply(
             f"ℹ️ Клиент <code>{esc(client.email)}</code> уже привязан к <code>{existing['user_id']}</code>.",
-            reply_markup=back_kb("adm:panel", "◀️ Назад"),
+            back_kb("adm:panel", "◀️ Назад"),
         )
         return
     if client.expires_at is None:
-        await message.answer(
+        await _reply(
             "❌ У клиента не задан срок в панели — задайте срок и повторите.",
-            reply_markup=back_kb("adm:panel", "◀️ Назад"),
+            back_kb("adm:panel", "◀️ Назад"),
         )
         return
     link = build_claim_link(bot_username, client.sub_id, cfg.claim_secret, ttl=cfg.claim_ttl_hours * 3600)
@@ -402,13 +440,13 @@ async def msg_claim_lookup(message: Message, state: FSMContext, db: Database, cf
         f"<code>{esc(link)}</code>\n\n"
         "Передайте клиенту ссылку или QR: он открывает бота — подписка привязывается к его Telegram."
     )
-    await message.answer(text, reply_markup=back_kb("adm:panel", "◀️ Назад"), disable_web_page_preview=True)
+    await _reply(text, back_kb("adm:panel", "◀️ Назад"))
     png = make_qr_png(link)
     if png:
         await message.answer_photo(BufferedInputFile(png, filename="claim-qr.png"),
                                    caption="📷 QR для привязки подписки")
     else:
-        await message.answer("ℹ️ Модуль qrcode не установлен — используйте ссылку выше.")
+        await _reply("ℹ️ Модуль qrcode не установлен — используйте ссылку выше.")
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +648,10 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
         await call.answer()
         return
     if action == "wipe":
+        # На каждую активную подписку — запрос в панель: отвечаем сразу.
+        await safe_answer(call)
+        await _working(call, "⏳ Отключаю подписки…",
+                       back_kb(f"adm:user:card:{user_id}", "◀️ К пользователю"))
         panel = get_panel(cfg, db)
         removed = 0
         for sub in await db.user_subscriptions(user_id):
@@ -620,7 +662,7 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
                     log.warning("Не удалось удалить клиента %s: %s", sub["panel_username"], exc)
             await db.update_subscription(int(sub["id"]), status="disabled")
             removed += 1
-        await call.answer(f"Отключено подписок: {removed}", show_alert=True)
+        log.info("Админ %s отключил %s подписок пользователя %s", call.from_user.id, removed, user_id)
         await _show_user_card(call, db, cfg, user_id)
         return
     await call.answer()
@@ -630,13 +672,19 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
 async def cb_grant_plan(call: CallbackQuery, db: Database, cfg: Config, bot: Bot) -> None:
     _, _, raw_id, plan_code = call.data.split(":", 3)
     user_id = int(raw_id)
+    # Выдача в панели — до 20 с: отвечаем сразу, статус показываем в окне.
+    await safe_answer(call)
+    await _working(call, "⏳ Выдаю доступ…",
+                   back_kb(f"adm:user:card:{user_id}", "◀️ К пользователю"))
     try:
         await grant_subscription(bot, cfg, db, user_id, plan_code)
     except PanelError as exc:
-        await call.answer(f"Ошибка выдачи: {exc}", show_alert=True)
+        await call.message.edit_text(
+            f"⚠️ Ошибка выдачи: {esc(exc)}",
+            reply_markup=back_kb(f"adm:user:card:{user_id}", "◀️ К пользователю"),
+        )
         return
     await call.message.edit_text(f"✅ Подписка <b>{plan_code}</b> выдана пользователю <code>{user_id}</code>.")
-    await call.answer()
 
 
 @router.callback_query(F.data.startswith("adm:reissue:"))
@@ -653,9 +701,11 @@ async def cb_reissue(call: CallbackQuery, state: FSMContext, db: Database, cfg: 
     if data.get("reissue_confirm") == sub_id:
         await state.update_data(reissue_confirm=None)
         await call.answer("Выполняю перевыдачу…")
+        await _working(call, "⏳ Перевыдаю конфиг…")
         result = await reissue_subscription(bot, cfg, db, sub_id, actor_id=call.from_user.id)
         if not result["ok"]:
-            await call.message.answer(f"❌ Перевыдача не выполнена: {esc(result['error'])}")
+            await call.message.answer(f"❌ Перевыдача не выполнена: {esc(result['error'])}",
+                                      reply_markup=back_kb("adm:panel", "◀️ Назад"))
             return
         row = result["row"]
         await call.message.answer(
@@ -666,6 +716,7 @@ async def cb_reissue(call: CallbackQuery, state: FSMContext, db: Database, cfg: 
             f"<code>{esc(result['new_username'])}</code>\n"
             f"Старый клиент: {'удалён ✅' if result['client_deleted'] else 'НЕ удалён — проверьте панель ⚠️'}\n"
             "Новая ссылка отправлена пользователю.",
+            reply_markup=back_kb(f"adm:user:subs:{row['user_id']}", "◀️ К подпискам"),
         )
         return
 
