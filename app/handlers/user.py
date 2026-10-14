@@ -155,6 +155,9 @@ class TicketStates(StatesGroup):
 @router.message(CommandStart())
 async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_username: str = "") -> None:
     user = message.from_user
+    # /start — явная команда «с чистого листа»: забываем старое окно,
+    # чтобы меню было отправлено новым сообщением, а не отредактировано в старом.
+    ui.forget(int(message.chat.id))
     payload = ""
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) > 1:
