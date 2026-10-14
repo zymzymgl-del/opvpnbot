@@ -512,6 +512,50 @@ async def run() -> None:
     finally:
         panels_mod._panel = saved_panel
 
+    print("\n6. Вебхук Telegram (приём апдейтов)")
+    import dataclasses as dc
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from app.webhook import build_webhook_app, drain_pending_updates
+
+    tg_cfg = dc.replace(
+        cfg,
+        tg_webhook_enabled=True,
+        tg_webhook_url="https://bot.example.com/tg/webhook",
+        tg_webhook_secret="it-tg-secret",
+        tg_webhook_fast_ack=True,
+    )
+    payload = make_message(7777, "/menu").model_dump(mode="json")
+    tg_app = build_webhook_app(tg_cfg, db, bot, None, dp)
+    async with TestClient(TestServer(tg_app)) as client:
+        resp = await client.post("/tg/webhook", json=payload)
+        expect("без secret-заголовка запрос отвергнут (403)", resp.status == 403, f"status={resp.status}")
+        resp = await client.post("/tg/webhook", json=payload,
+                                 headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"})
+        expect("с неверным секретом запрос отвергнут (403)", resp.status == 403, f"status={resp.status}")
+
+        OUT.clear()
+        resp = await client.post("/tg/webhook", json=payload,
+                                 headers={"X-Telegram-Bot-Api-Secret-Token": "it-tg-secret"})
+        expect("апдейт с верным секретом принят (200 сразу, fast-ack)",
+               resp.status == 200, f"status={resp.status}")
+        # fast-ack: обработка идёт в фоне — дожидаемся её как при остановке бота.
+        await drain_pending_updates()
+    expect("принятый апдейт обработан в фоне (меню отправлено)",
+           "Главное меню" in sent("message"), sent("message")[:120])
+
+    # Тот же апдейт в синхронном режиме: ответ приходит после обработки.
+    sync_cfg = dc.replace(tg_cfg, tg_webhook_fast_ack=False)
+    sync_app = build_webhook_app(sync_cfg, db, bot, None, dp)
+    async with TestClient(TestServer(sync_app)) as client:
+        OUT.clear()
+        resp = await client.post("/tg/webhook", json=payload,
+                                 headers={"X-Telegram-Bot-Api-Secret-Token": "it-tg-secret"})
+        expect("синхронный режим тоже обрабатывает апдейт (200)",
+               resp.status == 200 and "Главное меню" in sent("message"),
+               f"status={resp.status} {sent('message')[:120]}")
+
     await db.close()
     await bot.session.close()
 

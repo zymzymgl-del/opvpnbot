@@ -6,7 +6,7 @@
 
 Полноценный Telegram-бот для продажи VPN-подписок на **aiogram 3**: витрина тарифов, оплата через **ЮKassa** (карты РФ, СБП, SberPay), автоматическая выдача ключей через панель **3x-ui**, промокоды, поддержка, напоминания и админ-панель прямо в Telegram.
 
-Установщик (Debian/Ubuntu) спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `opvpnbot` и запустит бота с автозапуском. Если указать домен — он же настроит **nginx + HTTPS (Let's Encrypt)** для вебхука ЮKassa и `/healthz` и включит **ufw** (SSH/80/443 открываются ДО включения, чтобы не потерять доступ к серверу).
+Установщик (Debian/Ubuntu) спросит токен бота, ваш Telegram ID, способы оплаты и режим выдачи ключей, затем поставит зависимости, создаст `.env`, заведёт systemd-службу `opvpnbot` и запустит бота с автозапуском. Если указать домен — он же настроит **nginx + HTTPS (Let's Encrypt)** для вебхуков (ЮKassa и апдейтов Telegram) и `/healthz` и включит **ufw** (SSH/80/443 открываются ДО включения, чтобы не потерять доступ к серверу).
 
 Развернуть всё одной командой:
 
@@ -95,7 +95,8 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 
 ### Технические фишки
 
-- long-polling (не нужен домен) — или вебхуки ЮKassa отдельным HTTP-сервером, если есть публичный адрес;
+- анонс апдейтов Telegram: long-polling (идёт из коробки, домен не нужен) или **вебхук** по HTTPS — быстрее отклик, нет холостых `getUpdates`;
+- вебхуки ЮKassa тем же HTTP-сервером — мгновенная выдача доступа после оплаты;
 - **проверка платежа по API** (телу вебхука не доверяем — сверяем сумму и статус);
 - резервный опрос ЮKassa раз в 3 минуты, если вебхуки выключены;
 - фоновая обработка: истечение подписок (с отключением клиента в панели), напоминания, автоотмена «висящих» заказов;
@@ -121,16 +122,18 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 
 ---
 
-## 🌐 nginx: вебхук ЮKassa и мониторинг
+## 🌐 nginx: вебхуки (ЮKassa и Telegram) и мониторинг
 
-Нужен, если хотите **мгновенные** уведомления ЮKassa (вместо опроса раз в 3 минуты)
-и/или внешний монитор `/healthz`. Без домена бот отлично работает и без nginx — см.
-[docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md).
+Нужен, если хотите **мгновенные** уведомления ЮKassa (вместо опроса раз в 3 минуты),
+отклик бота через **вебхук Telegram** (вместо `getUpdates`) и/или внешний монитор `/healthz`.
+Без домена бот отлично работает и без nginx — анонсы идут long-polling'ом —
+см. [docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md).
 
 **Проще всего — доверить это установщику:** `sudo bash install.sh --domain <домен> --email <адрес>`,
 и он сам поставит nginx + certbot, выпустит сертификат, отрендерит конфиг из
 [`deploy/nginx/opvpnbot.conf.tmpl`](deploy/nginx/opvpnbot.conf.tmpl), включит `WEBHOOK_ENABLED`,
-`WEBHOOK_TRUST_PROXY` и `WEBHOOK_HOST=127.0.0.1`, а также закроет лишние порты через ufw.
+`WEBHOOK_TRUST_PROXY`, `TG_WEBHOOK_ENABLED` (с сгенерированным `TG_WEBHOOK_SECRET`) и
+`WEBHOOK_HOST=127.0.0.1`, а также закроет лишние порты через ufw.
 Ниже — ручной вариант, если nginx уже занят другими сайтами или нужна своя конфигурация.
 
 ### 1. Установка nginx и HTTPS-сертификата
@@ -164,6 +167,17 @@ server {
         proxy_send_timeout 30s;
     }
 
+    # Апдейты Telegram → бот (когда TG_WEBHOOK_ENABLED=true)
+    location /tg/webhook {
+        proxy_pass http://127.0.0.1:8080/tg/webhook;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
     # Healthcheck для внешнего uptime-монитора
     location = /healthz {
         proxy_pass http://127.0.0.1:8081/healthz;
@@ -192,6 +206,13 @@ sudo tail -f /var/log/nginx/error.log
 WEBHOOK_ENABLED=true
 WEBHOOK_PUBLIC_URL=https://tg1.openplanetvpn.com/yookassa/webhook
 WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, иначе вебхуки получат 403
+
+# Апдейты Telegram вместо long-polling (регистрировать адрес нигде не нужно —
+# бот сам вызывает setWebhook при старте). Путь НЕ должен совпадать с WEBHOOK_PATH.
+TG_WEBHOOK_ENABLED=true
+TG_WEBHOOK_URL=https://tg1.openplanetvpn.com/tg/webhook
+TG_WEBHOOK_SECRET=<openssl rand -hex 32>
+TG_WEBHOOK_FAST_ACK=true     # 200 Telegram сразу, обработка в фоне (рекомендуется)
 ```
 
 Тот же адрес укажите в кабинете ЮKassa (**Интеграция → HTTP-уведомления**, событие
@@ -217,6 +238,8 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 | `REQUIRED_CHANNELS`                                | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала)                         |
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |
+| `TG_WEBHOOK_ENABLED`, `TG_WEBHOOK_URL`, `TG_WEBHOOK_SECRET` | Апдейты Telegram вебхуком вместо long-polling (пустой `SECRET` и неверный URL — ошибка на старте) |
+| `TG_WEBHOOK_FAST_ACK`                              | `true` — отвечать Telegram 200 сразу, обработку вести в фоне (нужно при долгой выдаче в панели) |
 | `HEALTH_ENABLED`, `HEALTH_HOST`, `HEALTH_PORT`     | HTTP-эндпоинт `GET /healthz` для внешнего мониторинга (uptime)                               |
 | `APP_VERSION`                                      | Версия сборки для «О боте» и `/healthz` (пусто — вычислим из git; `install.sh`/Docker проставляют сами) |
 | `NOTIFY_DAYS_BEFORE`                               | За сколько дней напоминать: по умолчанию `3,1`                                               |
@@ -237,6 +260,7 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 - [ ] `XUI_SUB_BASE` — если нужна одна ссылка-подписка на несколько inbound'ов
 - [ ] `PAYMENT_METHODS=yookassa` + `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` (боевой магазин; `YOOKASSA_TEST=false`)
 - [ ] `WEBHOOK_ENABLED=true` + `WEBHOOK_PUBLIC_URL`, и тот же адрес прописан в кабинете ЮKassa
+- [ ] `TG_WEBHOOK_ENABLED=true` + `TG_WEBHOOK_URL` (путь ≠ `WEBHOOK_PATH`) + `TG_WEBHOOK_SECRET` — если апдейты Telegram идут вебхуком
 
 **Проверить после запуска**
 
@@ -269,7 +293,7 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 curl -fsS http://127.0.0.1:8081/healthz && echo OK
 ```
 
-Для systemd — проксируйте адрес через nginx (см. «🌐 nginx: вебхук ЮKassa и мониторинг»); для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
+Для systemd — проксируйте адрес через nginx (см. «🌐 nginx: вебхуки (ЮKassa и Telegram) и мониторинг»); для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
 
 ### Уведомления о падении
 
@@ -297,7 +321,7 @@ GitHub Actions (`.github/workflows/ci.yml`) на каждый push/PR гоняе
 ## 🗂 Структура проекта
 
 ```
-bot.py                     точка входа: конфиг, диспетчер, polling, фоновые задачи
+bot.py                     точка входа: конфиг, диспетчер, транспорт (вебхук/polling), фоновые задачи
 app/config.py              чтение и валидация .env
 app/db.py                  SQLite: пользователи, заказы, подписки, промо, тикеты
 app/runtime.py             настройки, изменяемые из админки на лету
@@ -309,7 +333,7 @@ app/handlers/admin.py      админ-панель
 app/services/panels.py     панель 3x-ui
 app/services/payments.py   ЮKassa API (REST v3)
 app/services/subs.py       выдача, продление, истечение, напоминания
-app/webhook.py             HTTP-сервер уведомлений ЮKassa
+app/webhook.py             HTTP-сервер вебхуков: уведомления ЮKassa + апдейты Telegram
 app/health.py              healthcheck GET /healthz для внешнего мониторинга
 tools/selftest.py          автотест логики без сети
 tools/integration_test.py  тест маршрутизации апдейтов через диспетчер

@@ -4,7 +4,7 @@
 # не правьте копию в /etc/nginx/sites-available/opvpnbot — правьте этот шаблон.
 #
 # Подстановки (подставляет install.sh): домен, пути к сертификату,
-# путь и порт вебхука, порт healthcheck. Литеральных плейсхолдеров нет —
+# пути и порт вебхуков, порт healthcheck. Литеральных плейсхолдеров нет —
 # не добавляйте их в комментарии: sed подставит значения и там.
 
 server {
@@ -33,6 +33,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         # ОБЯЗАТЕЛЬНО при WEBHOOK_TRUST_PROXY=true: иначе бот не увидит IP ЮKassa → 403.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    # Telegram → бот: апдейты (когда TG_WEBHOOK_ENABLED=true).
+    location @@TG_WEBHOOK_PATH@@ {
+        proxy_pass http://127.0.0.1:@@WEBHOOK_PORT@@@@TG_WEBHOOK_PATH@@;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Обработка апдейта идёт в фоне (TG_WEBHOOK_FAST_ACK), ответ — мгновенный.
         proxy_read_timeout 30s;
         proxy_send_timeout 30s;
     }

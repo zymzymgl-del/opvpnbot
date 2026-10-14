@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -156,6 +158,12 @@ class Config:
     webhook_public_url: str
     webhook_trust_proxy: bool
 
+    # --- Вебхук Telegram (вместо long-polling) ---
+    tg_webhook_enabled: bool
+    tg_webhook_url: str
+    tg_webhook_secret: str
+    tg_webhook_fast_ack: bool
+
     # --- Healthcheck (внешний мониторинг) ---
     health_enabled: bool
     health_host: str
@@ -180,6 +188,21 @@ class Config:
     @property
     def yookassa_enabled(self) -> bool:
         return "yookassa" in self.payment_methods and bool(self.yookassa_shop_id and self.yookassa_secret_key)
+
+    @property
+    def tg_webhook_path(self) -> str:
+        """Локальный путь, который слушает бот (берётся из публичного URL).
+
+        Один источник правды: куда nginx проксирует запросы, туда же смотрит
+        маршрут aiohttp — расхождение путей ломало бы приём апдейтов.
+        """
+        path = urlsplit(self.tg_webhook_url).path or ""
+        return path if len(path) > 1 else "/tg/webhook"
+
+    @property
+    def any_webhook_enabled(self) -> bool:
+        """Нужно ли поднимать общий HTTP-сервер (ЮKassa и/или Telegram)."""
+        return self.webhook_enabled or self.tg_webhook_enabled
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
@@ -226,6 +249,10 @@ def load_config() -> Config:
         webhook_path=_str("WEBHOOK_PATH", "/yookassa/webhook"),
         webhook_public_url=_str("WEBHOOK_PUBLIC_URL"),
         webhook_trust_proxy=_bool("WEBHOOK_TRUST_PROXY", False),
+        tg_webhook_enabled=_bool("TG_WEBHOOK_ENABLED", False),
+        tg_webhook_url=_str("TG_WEBHOOK_URL").rstrip("/"),
+        tg_webhook_secret=_str("TG_WEBHOOK_SECRET"),
+        tg_webhook_fast_ack=_bool("TG_WEBHOOK_FAST_ACK", True),
         health_enabled=_bool("HEALTH_ENABLED", True),
         health_host=_str("HEALTH_HOST", "127.0.0.1"),
         health_port=_int("HEALTH_PORT", 8081),
@@ -280,14 +307,57 @@ def validate(cfg: Config) -> list[str]:
         )
     if cfg.health_enabled and cfg.health_port <= 0:
         problems.append("HEALTH_PORT должен быть больше нуля (либо выключите HEALTH_ENABLED).")
-    if cfg.health_enabled and cfg.webhook_enabled and cfg.health_port == cfg.webhook_port:
+    if cfg.health_enabled and cfg.any_webhook_enabled and cfg.health_port == cfg.webhook_port:
         problems.append(
             "HEALTH_PORT и WEBHOOK_PORT совпадают — healthcheck и вебхуки не смогут слушать "
             "один порт. Разведите их (например, HEALTH_PORT=8081, WEBHOOK_PORT=8080)."
         )
+    problems.extend(_validate_tg_webhook(cfg))
     if cfg.payments_proxy and not cfg.payments_proxy.startswith(("http://", "https://")):
         problems.append(
             "PAYMENTS_PROXY должен начинаться с http:// или https:// "
             "(aiohttp умеет только HTTP-прокси; для SOCKS нужна библиотека aiohttp-socks)."
+        )
+    return problems
+
+
+#: secret_token Telegram: 1-256 символов, допустимы A-Z, a-z, 0-9, «_» и «-».
+TG_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{8,256}")
+
+
+def _validate_tg_webhook(cfg: Config) -> list[str]:
+    """Проверки режима вебхука Telegram (пусто, если режим выключен)."""
+    problems: list[str] = []
+    if not cfg.tg_webhook_enabled:
+        return problems
+    if not cfg.tg_webhook_url:
+        problems.append(
+            "TG_WEBHOOK_ENABLED=true, но TG_WEBHOOK_URL не задан — укажите публичный адрес "
+            "вида https://bot.example.com/tg/webhook (он же задаёт путь на nginx)."
+        )
+        return problems
+    parts = urlsplit(cfg.tg_webhook_url)
+    if parts.scheme != "https" or not parts.netloc:
+        problems.append(
+            f"TG_WEBHOOK_URL={cfg.tg_webhook_url!r} — нужен публичный адрес вида "
+            "https://bot.example.com/tg/webhook: Telegram принимает только HTTPS с валидным "
+            "сертификатом (самоподписанные и http отклоняет)."
+        )
+    elif len(parts.path) < 2:
+        problems.append(
+            "TG_WEBHOOK_URL должен содержать путь (например /tg/webhook): "
+            "адрес без пути Telegram не примет."
+        )
+    elif cfg.tg_webhook_path == cfg.webhook_path:
+        problems.append(
+            f"TG_WEBHOOK_URL и WEBHOOK_PATH указывают на один путь {cfg.webhook_path!r} — "
+            "вебхуки ЮKassa и Telegram слушают один порт, разведите пути "
+            "(например /tg/webhook и /yookassa/webhook)."
+        )
+    if not TG_SECRET_RE.fullmatch(cfg.tg_webhook_secret):
+        problems.append(
+            "TG_WEBHOOK_SECRET задан неверно: нужен secret_token Telegram из 8-256 символов "
+            "A-Z, a-z, 0-9, «_» и «-». Сгенерировать: openssl rand -hex 32. "
+            "Без него бот отвергает все запросы (403)."
         )
     return problems

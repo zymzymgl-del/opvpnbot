@@ -653,6 +653,41 @@ async def run() -> None:
     check("ротация держит не больше backup_keep копий", len(remaining) <= 2, str([p.name for p in remaining]))
     check("копия читается как SQLite и содержит таблицы", _sqlite_backup_ok(remaining[-1] if remaining else Path(p1)))
 
+    # 13c. Вебхук Telegram: конфиг, путь и secret_token
+    from app.config import _validate_tg_webhook
+    from app.webhook import _secret_ok
+
+    check("вебхук Telegram по умолчанию выключен", cfg.tg_webhook_enabled is False)
+    check("общий HTTP-сервер нужен только при включённом вебхуке",
+          cfg.any_webhook_enabled == (cfg.webhook_enabled or cfg.tg_webhook_enabled))
+    check("TG_WEBHOOK_URL по умолчанию пуст", cfg.tg_webhook_url == "")
+    check("fast-ack включён по умолчанию", cfg.tg_webhook_fast_ack is True)
+    check("путь по умолчанию — /tg/webhook", cfg.tg_webhook_path == "/tg/webhook")
+
+    tg_on = _dc.replace(cfg, tg_webhook_enabled=True,
+                        tg_webhook_url="https://bot.example.com/tg/webhook",
+                        tg_webhook_secret="a" * 32)
+    check("корректный вебхук Telegram не даёт ошибок", _validate_tg_webhook(tg_on) == [],
+          "; ".join(_validate_tg_webhook(tg_on)))
+    check("путь слушается там же, куда указывает публичный URL",
+          tg_on.tg_webhook_path == "/tg/webhook")
+    check("незаданный TG_WEBHOOK_URL отклоняется",
+          _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_url="")) != [])
+    check("http:// вместо https:// отклоняется",
+          _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_url="http://bot.example.com/tg/webhook")) != [])
+    check("URL без пути отклоняется",
+          _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_url="https://bot.example.com")) != [])
+    check("пустой secret отклоняется", _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="")) != [])
+    check("короткий secret отклоняется",
+          _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="short")) != [])
+    check("secret с недопустимыми символами отклоняется",
+          _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="не-секрет-12345")) != [])
+    check("совпадение путей с вебхуком ЮKassa отклоняется",
+          any("один путь" in p for p in _validate_tg_webhook(_dc.replace(tg_on, webhook_path="/tg/webhook"))))
+    check("секрет сверяется побайтово", _secret_ok("a" * 32, "a" * 32))
+    check("неверный секрет отклоняется", not _secret_ok("b" * 32, "a" * 32))
+    check("пустой ожидаемый секрет не пропускает запрос", not _secret_ok("", ""))
+
     print("\n14. Привязка существующего клиента панели (QR/claim)")
 
     class StubXuiPanel(BasePanel):

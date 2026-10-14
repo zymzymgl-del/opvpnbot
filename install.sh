@@ -16,8 +16,8 @@
 #      sudo bash install.sh --domain bot.example.com --email you@example.com --yes
 #
 #  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
-#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*, DOMAIN, LEMC_EMAIL. Полный список —
-#  в .env.example. Пример:
+#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*, TG_WEBHOOK_*, DOMAIN, LEMC_EMAIL.
+#  Полный список — в .env.example. Пример:
 #      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 APP=... bash install.sh --yes
 # ============================================================================
 set -euo pipefail
@@ -44,6 +44,14 @@ WITH_FIREWALL="${WITH_FIREWALL:-true}"   # "true"/"false" — ufw с уже от
 WEBHOOK_PATH="${WEBHOOK_PATH:-/yookassa/webhook}"
 WEBHOOK_PORT="${WEBHOOK_PORT:-8080}"
 HEALTH_PORT="${HEALTH_PORT:-8081}"
+#: Путь апдейтов Telegram (должен отличаться от WEBHOOK_PATH — общий порт).
+TG_WEBHOOK_PATH="${TG_WEBHOOK_PATH:-/tg/webhook}"
+#: true/false — переводить ли апдейты Telegram на вебхук. Пусто/по умолчанию —
+#: да, если настроен nginx (HTTPS); при TG_WEBHOOK_ENABLED=true без nginx нужен
+#: свой reverse-proxy перед ботом.
+TG_WEBHOOK_ENABLED="${TG_WEBHOOK_ENABLED:-}"
+TG_WEBHOOK_URL="${TG_WEBHOOK_URL:-}"
+TG_WEBHOOK_SECRET="${TG_WEBHOOK_SECRET:-}"
 #: Доп. порты для ufw (через запятую), например порт VPN-inbound: --allow-port 8443
 EXTRA_PORTS="${EXTRA_PORTS:-}"
 
@@ -69,7 +77,9 @@ OPVPN — установщик
   --no-service        не создавать systemd-службу (только venv + .env)
   --dir <путь>        каталог установки (по умолчанию — каталог запуска install.sh,
                       иначе /srv/opvpnbot)
-  --domain <домен>    настроить nginx + Let's Encrypt для вебхука ЮKassa и /healthz
+  --domain <домен>    настроить nginx + Let's Encrypt для вебхуков и /healthz
+                      (с nginx апдейты Telegram переводятся на вебхук;
+                      выключить: TG_WEBHOOK_ENABLED=false)
   --email <адрес>     e-mail для Let's Encrypt (обязателен при --domain)
   --with-nginx        включить настройку nginx (домен спросит/возьмёт из окружения)
   --no-nginx          не трогать nginx
@@ -265,7 +275,16 @@ collect_config() {
   if [ -n "${DOMAIN:-}" ]; then
     WITH_NGINX=1
     WEBHOOK_PUBLIC_URL="https://${DOMAIN}${WEBHOOK_PATH}"
+    TG_WEBHOOK_URL="https://${DOMAIN}${TG_WEBHOOK_PATH}"
     ask_required LEMC_EMAIL "E-mail для Let's Encrypt (уведомления о сертификате)"
+    # HTTPS уже есть — апдейты Telegram логичнее получать вебхуком (быстрее, без
+    # лишних запросов getUpdates). Регистрировать адрес вручную не нужно: бот
+    # сам вызывает setWebhook при старте.
+    ask_choice TG_WEBHOOK_ENABLED "Перевести апдейты Telegram на вебхук" "${TG_WEBHOOK_ENABLED:-true}" true false
+    if [ "${TG_WEBHOOK_ENABLED:-false}" = "true" ] && [ -z "${TG_WEBHOOK_SECRET:-}" ]; then
+      TG_WEBHOOK_SECRET="$(gen_secret)"
+      info "Сгенерирован TG_WEBHOOK_SECRET (проверка запросов от Telegram)."
+    fi
   elif [ "$WITH_NGINX" -eq 1 ]; then
     die "Указан --with-nginx, но домен не задан (--domain)."
   fi
@@ -339,6 +358,13 @@ write_env() {
     set_env "$env_file" WEBHOOK_HOST 127.0.0.1
     set_env "$env_file" WEBHOOK_PATH "$WEBHOOK_PATH"
     set_env "$env_file" WEBHOOK_PORT "$WEBHOOK_PORT"
+  fi
+
+  # Апдейты Telegram (вебхук) — если решено перевести бота с long-polling.
+  if [ "${TG_WEBHOOK_ENABLED:-false}" = "true" ]; then
+    set_env "$env_file" TG_WEBHOOK_ENABLED true
+    put_env "$env_file" TG_WEBHOOK_URL "${TG_WEBHOOK_URL:-}"
+    put_env "$env_file" TG_WEBHOOK_SECRET "${TG_WEBHOOK_SECRET:-}"
   fi
 }
 
@@ -500,6 +526,7 @@ render_nginx_config() {
       -e "s|@@CERT@@|/etc/letsencrypt/live/${DOMAIN}/fullchain.pem|g" \
       -e "s|@@KEY@@|/etc/letsencrypt/live/${DOMAIN}/privkey.pem|g" \
       -e "s|@@WEBHOOK_PATH@@|${WEBHOOK_PATH}|g" \
+      -e "s|@@TG_WEBHOOK_PATH@@|${TG_WEBHOOK_PATH}|g" \
       -e "s|@@WEBHOOK_PORT@@|${WEBHOOK_PORT}|g" \
       -e "s|@@HEALTH_PORT@@|${HEALTH_PORT}|g" \
       "$tmpl" > "$out"
@@ -740,11 +767,18 @@ main() {
   setup_firewall
   verify_deploy
 
-  local public=""
+  local public="" tg_line=""
   if [ "$WITH_NGINX" -eq 1 ] && [ -n "${DOMAIN:-}" ]; then
+    if [ "${TG_WEBHOOK_ENABLED:-false}" = "true" ]; then
+      tg_line="
+  Апдейты Telegram: https://${DOMAIN}${TG_WEBHOOK_PATH}   (вебхук: бот регистрирует его сам при старте)"
+    else
+      tg_line="
+  Апдейты Telegram: long-polling (getUpdates)"
+    fi
     public="
   Публичный адрес: https://${DOMAIN}
-  Вебхук ЮKassa:   https://${DOMAIN}${WEBHOOK_PATH}   (укажите тот же адрес в кабинете ЮKassa)
+  Вебхук ЮKassa:   https://${DOMAIN}${WEBHOOK_PATH}   (укажите тот же адрес в кабинете ЮKassa)${tg_line}
   Healthcheck:     https://${DOMAIN}/healthz
 "
   fi

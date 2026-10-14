@@ -4,12 +4,12 @@
 
 ## 1. Обзор
 
-**OPVPN** (`app/__init__.py: __version__ = "2.0.0"`) — Telegram-бот для продажи VPN-подписок на **aiogram 3** (long-polling) с хранением состояния в **SQLite** (`aiosqlite`, WAL).
+**OPVPN** (`app/__init__.py: __version__ = "2.0.0"`) — Telegram-бот для продажи VPN-подписок на **aiogram 3** (long-polling или вебхук Telegram) с хранением состояния в **SQLite** (`aiosqlite`, WAL).
 
 Слои:
 
 ```
-bot.py                     — точка входа: конфиг → БД → диспетчер → polling + фоновый воркер
+bot.py                     — точка входа: конфиг → БД → диспетчер → транспорт (вебхук/polling) + фоновый воркер
 app/config.py              — неизменяемая конфигурация из .env (dataclass Config, frozen)
 app/runtime.py             — изменяемые «на лету» настройки (триал, реф-%), поверх .env
 app/db.py                  — единственный слой доступа к данным (класс Database)
@@ -21,7 +21,7 @@ app/handlers/admin.py      — админский Router (фильтр IsAdmin �
 app/services/panels.py     — выдача ключей: BasePanel → XuiPanel (3x-ui)
 app/services/payments.py   — YooKassaClient (REST v3: создание платежа, проверка статуса)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
-app/webhook.py             — aiohttp-сервер уведомлений ЮKassa (опционально)
+app/webhook.py             — aiohttp-сервер вебхуков: уведомления ЮKassa + апдейты Telegram (опционально)
 app/health.py              — aiohttp-сервер GET /healthz для внешнего мониторинга (uptime)
 app/logctx.py              — request_id (contextvars) для корреляции логов одного апдейта
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
@@ -40,7 +40,19 @@ requirements-dev.txt       — инструменты разработки (ruff
 3. `runtime.load(db, cfg)` накладывается поверх `.env`: значения из таблицы `settings` (правки админки) приоритетнее.
 4. `build_dispatcher()` кладёт `cfg/db/yk/bot_username` в `dp` (workflow data) и подключает outer-middleware `ErrorsMiddleware`, затем `Throttling → User → RequiredChannel` на messages и callbacks. Роутеры: сначала `admin`, затем `user` (последний содержит перехватчик `adm:*` → «недостаточно прав»).
 5. Фоновый `background_worker` (цикл 180 с): `process_expired → send_reminders → poll_yookassa_orders → cancel_stale_orders`.
-6. Остановка: SIGINT/SIGTERM → `stop_event` → `dp.stop_polling()`, в `finally` закрываются health-runner, webhook-runner, платёжные клиенты, панель, БД, сессия бота.
+5a. **Транспорт апдейтов** (`TG_WEBHOOK_ENABLED`, по умолчанию выключен):
+   - *выключен* — `dp.start_polling()`; на старте вызывается `bot.delete_webhook()`,
+     иначе `getUpdates` падает с «Conflict: can't use getUpdates method while webhook is active»;
+   - *включён* — HTTP-сервер вебхуков регистрирует маршрут `TG_WEBHOOK_URL` (его путь),
+     бот вызывает `set_webhook(url, secret_token, allowed_updates)` и ждёт `stop_event`
+     (вебхук намеренно НЕ снимается при остановке: Telegram переживёт перезапуск службы);
+   - `TG_WEBHOOK_FAST_ACK=true` — при верном заголовке `X-Telegram-Bot-Api-Secret-Token`
+     отвечаем 200 и обрабатываем апдейт в фоне (`_spawn_update`), чтобы долгая выдача
+     в панели (до 20 с) не приводила к повторной доставке; при остановке бота фоновые
+     задачи дожидаются `drain_pending_updates()`;
+   - при `fast_ack=false` обработка синхронная (ошибка → 500, Telegram повторит);
+   - если `set_webhook` не удался (битый URL/сертификат) — автоматический откат на polling.
+6. Остановка: SIGINT/SIGTERM → `stop_event` → `dp.stop_polling()` (только в режиме polling), в `finally` дожидаются фоновые апдейты, закрываются health-runner, webhook-runner, платёжные клиенты, панель, БД, сессия бота.
 
 ## 3. Модель БД (SQLite)
 

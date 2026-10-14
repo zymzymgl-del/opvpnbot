@@ -41,6 +41,7 @@ jobs:
           render_nginx_config deploy/nginx/opvpnbot.conf.tmpl /tmp/opvpn.conf
           grep -q 'server_name bot.example.com;' /tmp/opvpn.conf
           grep -q 'proxy_pass http://127.0.0.1:8080/yookassa/webhook;' /tmp/opvpn.conf
+          grep -q 'proxy_pass http://127.0.0.1:8080/tg/webhook;' /tmp/opvpn.conf
           if grep -q '@@' /tmp/opvpn.conf; then echo 'остались незаменённые @@ плейсхолдеры'; exit 1; fi
 
       - name: Audit dependencies (pip-audit)

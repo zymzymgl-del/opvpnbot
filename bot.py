@@ -7,8 +7,10 @@
 1. читаем .env, проверяем конфигурацию;
 2. подключаем SQLite, применяем рантайм-настройки;
 3. собираем диспетчер aiogram (мидлвари + роутеры пользователя и админа);
-4. при WEBHOOK_ENABLED=true поднимаем HTTP-сервер для уведомлений ЮKassa;
-5. крутим long-polling и фоновый воркер (напоминания, истечение, проверка платежей).
+4. поднимаем HTTP-сервер вебхуков (уведомления ЮKassa и/или апдейты Telegram);
+5. при TG_WEBHOOK_ENABLED=true регистрируем вебхук в Telegram (апдейты идут на
+   HTTP-сервер), иначе крутим long-polling; параллельно работает фоновый воркер
+   (напоминания, истечение, проверка платежей).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 
 from app import __author__, __author_url__, __build__
@@ -42,7 +45,7 @@ from app.runtime import runtime
 from app.services.panels import close_panel, get_panel
 from app.services.payments import YooKassaClient
 from app.services.subs import background_worker, notify_admins
-from app.webhook import start_webhook_server
+from app.webhook import drain_pending_updates, start_webhook_server
 
 log = logging.getLogger("opvpnbot")
 
@@ -126,15 +129,48 @@ async def main() -> None:
     dp = build_dispatcher(cfg, db, bot, yk)
     dp["bot_username"] = me.username
 
-    # --- вебхуки ЮKassa (необязательно) ---
+    # --- HTTP-сервер: вебхуки ЮKassa и/или апдейты Telegram ---
     webhook_runner = None
-    if cfg.webhook_enabled:
+    if cfg.any_webhook_enabled:
         try:
-            webhook_runner = await start_webhook_server(cfg, db, bot, yk)
+            webhook_runner = await start_webhook_server(cfg, db, bot, yk, dp)
         except OSError as exc:
             log.error("Не удалось запустить сервер вебхуков на %s:%s — %s",
                       cfg.webhook_host, cfg.webhook_port, exc)
-            log.error("Платежи будут подтверждаться опросом API (раз в 3 минуты).")
+            log.error("Платежи будут подтверждаться опросом API (раз в 3 минуты), "
+                      "апдейты Telegram — запросами getUpdates.")
+
+    # --- транспорт апдейтов Telegram: вебхук или long-polling -----------------
+    # Сначала пробуем вебхук; если он недоступен (нет HTTP-сервера или Telegram
+    # отверг URL) — снимаем вебхук и работаем через getUpdates, иначе бот вообще
+    # не получал бы апдейты.
+    tg_webhook_active = False
+    if cfg.tg_webhook_enabled and webhook_runner is not None:
+        try:
+            await bot.set_webhook(
+                url=cfg.tg_webhook_url,
+                secret_token=cfg.tg_webhook_secret,
+                allowed_updates=dp.resolve_used_update_types(),
+                drop_pending_updates=False,
+            )
+            info = await bot.get_webhook_info()
+            tg_webhook_active = True
+            log.info("Апдейты Telegram: вебхук %s (ожидает доставки: %s, ошибок: %s)",
+                     info.url, info.pending_update_count, info.last_error_message or "нет")
+        except TelegramAPIError as exc:
+            log.error("Не удалось установить вебхук Telegram (%s). Проверьте TG_WEBHOOK_URL: "
+                      "Telegram принимает только HTTPS с валидным сертификатом.", exc)
+
+    if not tg_webhook_active:
+        if cfg.tg_webhook_enabled:
+            log.error("Вебхук Telegram не работает — снимаю его и перехожу на long-polling, "
+                      "чтобы бот продолжал получать апдейты.")
+        # Вебхук мог остаться от прошлой конфигурации: пока он установлен,
+        # getUpdates падает с «Conflict: can't use getUpdates method while webhook is active».
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+        except TelegramAPIError as exc:
+            log.warning("Не удалось снять ранее установленный вебхук Telegram: %s", exc)
 
     # --- healthcheck для внешнего мониторинга (uptime) ---------------------
     health_runner = None
@@ -187,15 +223,25 @@ async def main() -> None:
         await stop_event.wait()
         log.info("Получен сигнал остановки — завершаем работу…")
         worker.cancel()
-        await dp.stop_polling()
+        if not tg_webhook_active:
+            await dp.stop_polling()
 
     watcher = asyncio.create_task(_watch_stop())
 
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        if tg_webhook_active:
+            # Апдейты приходят на HTTP-сервер: здесь только ждём сигнала остановки.
+            # Вебхук намеренно НЕ снимаем: пока служба перезапускается, Telegram
+            # будет повторять доставку и ни один апдейт не потеряется.
+            await stop_event.wait()
+        else:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         watcher.cancel()
         worker.cancel()
+        # Апдейты, принятые с «быстрым ack», обрабатываются в фоне — даём им
+        # завершиться, иначе на остановке теряются (Telegram уже получил 200).
+        await drain_pending_updates()
         if webhook_runner is not None:
             await webhook_runner.cleanup()
         if health_runner is not None:
