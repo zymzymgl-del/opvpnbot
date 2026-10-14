@@ -354,10 +354,35 @@ def _validate_tg_webhook(cfg: Config) -> list[str]:
             "вебхуки ЮKassa и Telegram слушают один порт, разведите пути "
             "(например /tg/webhook и /yookassa/webhook)."
         )
-    if not TG_SECRET_RE.fullmatch(cfg.tg_webhook_secret):
+    if not cfg.tg_webhook_secret:
         problems.append(
-            "TG_WEBHOOK_SECRET задан неверно: нужен secret_token Telegram из 8-256 символов "
-            "A-Z, a-z, 0-9, «_» и «-». Сгенерировать: openssl rand -hex 32. "
-            "Без него бот отвергает все запросы (403)."
+            "TG_WEBHOOK_ENABLED=true, но TG_WEBHOOK_SECRET пуст — сгенерируйте секрет "
+            "(openssl rand -hex 32) и впишите его в .env без кавычек, скобок и комментариев."
+        )
+    elif not TG_SECRET_RE.fullmatch(cfg.tg_webhook_secret):
+        problems.append(
+            f"TG_WEBHOOK_SECRET задан неверно: {_secret_hint(cfg.tg_webhook_secret)}. "
+            "Нужен secret_token Telegram из 8-256 символов A-Z, a-z, 0-9, «_» и «-» "
+            "(тот же секрет бот отправляет в setWebhook). Сгенерировать: openssl rand -hex 32"
         )
     return problems
+
+
+def _secret_hint(secret: str) -> str:
+    """Что именно не так с секретом — частые ошибки при вставке в .env.
+
+    Раньше все случаи сводились к одному сообщению «задан неверно», и понять,
+    что вставлен плейсхолдер из инструкции или остался пробел с комментарием,
+    можно было только чтением файла.
+    """
+    if "<" in secret or ">" in secret:
+        return "похоже, вставлен плейсхолдер вида <openssl rand -hex 32> — выполните команду и вставьте её вывод"
+    if any(ch.isspace() for ch in secret):
+        return "в значении есть пробел, таб или текст после пробела (например комментарий #) — уберите их"
+    if not secret.isascii():
+        return "есть символы вне латиницы (кириллица?) — Telegram принимает только A-Z, a-z, 0-9, «_» и «-»"
+    if len(secret) < 8:
+        return f"слишком короткий: {len(secret)} символов, нужно минимум 8"
+    if len(secret) > 256:
+        return f"слишком длинный: {len(secret)} символов, максимум 256"
+    return "недопустимые символы — разрешены только A-Z, a-z, 0-9, «_» и «-»"

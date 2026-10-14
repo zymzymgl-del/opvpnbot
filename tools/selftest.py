@@ -684,9 +684,56 @@ async def run() -> None:
           _validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="не-секрет-12345")) != [])
     check("совпадение путей с вебхуком ЮKassa отклоняется",
           any("один путь" in p for p in _validate_tg_webhook(_dc.replace(tg_on, webhook_path="/tg/webhook"))))
+    # Подсказки должны называть причину, а не просто «задан неверно»: с таким
+    # сообщением бот падал в рестарт-цикле, и причину искали чтением .env.
+    hint_placeholder = " ".join(_validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="<openssl rand -hex 32>")))
+    check("подсказка распознаёт плейсхолдер из инструкции", "плейсхолдер" in hint_placeholder, hint_placeholder)
+    hint_space = " ".join(_validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="abc12345 # мой секрет")))
+    check("подсказка распознаёт пробел/комментарий в значении", "пробел" in hint_space, hint_space)
+    hint_cyr = " ".join(_validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="секретик-123")))
+    check("подсказка распознаёт кириллицу", "латиницы" in hint_cyr, hint_cyr)
+    hint_short = " ".join(_validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="abc123")))
+    check("подсказка называет минимальную длину", "минимум 8" in hint_short, hint_short)
+    hint_empty = " ".join(_validate_tg_webhook(_dc.replace(tg_on, tg_webhook_secret="")))
+    check("пустой секрет: сказано, что делать", "сгенерируйте" in hint_empty, hint_empty)
     check("секрет сверяется побайтово", _secret_ok("a" * 32, "a" * 32))
     check("неверный секрет отклоняется", not _secret_ok("b" * 32, "a" * 32))
     check("пустой ожидаемый секрет не пропускает запрос", not _secret_ok("", ""))
+
+    # 13d. SQL-инъекции: внешние значения (включая поля вебхука) идут только
+    # параметрами; имена столбцов — из белых списков. Проверяем «боевыми» строками.
+    injected = "x' OR '1'='1' --"
+    order_id_inj = await db.create_order(
+        user_id=9101, plan_code="1m", amount=1, base_amount=1, promo_code=None,
+        method="manual", payment_id=injected,
+    )
+    check("SQL-мусор в payment_id сохраняется как обычный текст",
+          (await db.get_order(order_id_inj))["payment_id"] == injected)
+    found_order = await db.order_by_payment(injected)
+    check("поиск заказа по подставленной строке находит только свой заказ",
+          found_order is not None and int(found_order["id"]) == order_id_inj)
+    check("похожий платёж не зачитывается как чужой заказ",
+          await db.order_by_payment("x' OR '1'='1' --zzz") is None)
+    check("подстановка в order_id не проходит через int()",
+          await db.get_order(int("0")) is None)
+
+    await db.ensure_user(9102, injected, "Тест")
+    check("подставленное значение не подменяет условие поиска пользователя",
+          await db.find_user_by_username("x' OR '1'='1") is None
+          and (await db.find_user_by_username(injected)) is not None)
+
+    field_rejected = False
+    try:
+        await db.set_user_field(9102, "is_banned = 1 --", 1)
+    except ValueError:
+        field_rejected = True
+    check("имя столбца вне белого списка отклоняется",
+          field_rejected and int((await db.get_user(9102))["is_banned"]) == 0)
+
+    users_before = await db.count_users()
+    await db.update_subscription(999999, **{"status = 'x' WHERE 1=1 --": "y"})
+    check("незнакомый ключ update_subscription отброшен (таблица цела)",
+          await db.count_users() == users_before)
 
     print("\n14. Привязка существующего клиента панели (QR/claim)")
 

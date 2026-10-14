@@ -22,6 +22,10 @@ journalctl -u opvpnbot -n 200                # последние строки �
 
 1. `systemctl restart opvpnbot` (или `docker compose restart`).
 2. Если падает при старте — в логе будет блок «Проблемы конфигурации»: исправьте `.env` и перезапустите.
+   Служба при этом **не перезапускается сама** (`RestartPreventExitStatus=2` в юните: код 2 = ошибка
+   конфигурации, рестарты бы только заспамливали лог) и в `systemctl status` видна как `failed`.
+   Если systemd успел упереться в лимит запусков («start request repeated too quickly»),
+   перед перезапуском выполните `sudo systemctl reset-failed opvpnbot`.
 3. Проверьте, что запущен ровно один процесс: в логе одна строка `Start polling`
    (или `Апдейты Telegram: вебхук …` в режиме вебхука); см. также раздел 3a.
 4. Docker: `docker compose up -d --build`.

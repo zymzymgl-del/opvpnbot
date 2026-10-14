@@ -677,6 +677,10 @@ write_service() {
 Description=OPVPN (Telegram bot for VPN subscriptions)
 After=network-online.target
 Wants=network-online.target
+# Щит от crash-loop: не больше 12 запусков за 10 минут. Провал при старте из-за
+# сети успевает восстановиться сам, а вечный цикл падений не заспамливает лог.
+StartLimitIntervalSec=600
+StartLimitBurst=12
 
 [Service]
 Type=simple
@@ -688,6 +692,9 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/python $INSTALL_DIR/bot.py
 Restart=always
 RestartSec=5
+# Код 2 — ошибка конфигурации (bot.py: validate() → SystemExit(2)). Перезапуск
+# тут бессмыслен: .env сам не починится, а рестарты каждые 5 с топят лог.
+RestartPreventExitStatus=2
 TimeoutStopSec=20
 StandardOutput=journal
 StandardError=journal

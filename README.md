@@ -354,6 +354,8 @@ docs/                      инструкции, архитектура, runbook
 
 **Как обновить бота?** `sudo bash install.sh --update` (код скачается заново, `.env` и база сохранятся) или `git pull && systemctl restart opvpnbot`.
 
+**Служба в статусе `failed` и постоянно перезапускается.** Смотрите `journalctl -u opvpnbot -n 50`: блок «Проблемы конфигурации» = ошибка в `.env`. Системный юнит настроен так, что при коде выхода 2 (ошибка конфигурации) рестарта нет — исправьте `.env` и `sudo systemctl restart opvpnbot` (при сообщении «start request repeated too quickly» сначала `sudo systemctl reset-failed opvpnbot`).
+
 **Как узнать, какая сборка задеплоена?** `/healthz` отдаёт поле `build`, а «О боте» в админке показывает версию и сборку. В git-рабочей копии версия вычисляется автоматически (`git describe`), в `install.sh`/Docker — через переменную `APP_VERSION` (установщик проставляет её в `.env`).
 
 **Как забэкапить базу?** `/admin` → 💾 Бэкап базы — бот пришлёт файл SQLite. Данные и логи лежат в `data/`.
