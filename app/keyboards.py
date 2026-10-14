@@ -11,7 +11,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.utils import human_gb, price
+from app.utils import human_gb, human_left, price
 
 BTN_BUY = "🛒 Купить VPN"
 BTN_MY_KEYS = "🔑 Моя подписка"
@@ -232,14 +232,32 @@ def admin_users_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_user_kb(user_id: int, is_banned: bool) -> InlineKeyboardMarkup:
+def admin_user_kb(user_id: int, is_banned: bool,
+                  reissue_sub_id: int | None = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✉️ Написать", callback_data=f"adm:user:msg:{user_id}")
     builder.button(text="🎁 Выдать подписку", callback_data=f"adm:user:grant:{user_id}")
+    if reissue_sub_id:
+        # Перевыдача конфигов — в отдельном окне (adm:user:subs), чтобы не плодить кнопки.
+        builder.button(text="♻️ Перевыдать конфиги", callback_data=f"adm:user:subs:{user_id}")
     builder.button(text="🔓 Разблокировать" if is_banned else "🚫 Заблокировать",
                    callback_data=f"adm:user:{'unban' if is_banned else 'ban'}:{user_id}")
     builder.button(text="🗑 Удалить устройства", callback_data=f"adm:user:wipe:{user_id}")
     builder.button(text="◀️ К списку пользователей", callback_data="adm:users:page:0")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_subs_reissue_kb(user_id: int, subs: Sequence) -> InlineKeyboardMarkup:
+    """Список подписок пользователя с кнопкой «♻️ Перевыдать» для каждой (админка)."""
+    builder = InlineKeyboardBuilder()
+    for sub in subs[:10]:
+        status = {"active": "🟢", "expired": "⌛️", "disabled": "🚫"}.get(sub["status"], "•")
+        builder.button(
+            text=f"♻️ #{sub['id']} · {sub['plan_code']} · {status} {human_left(sub['expires_at'])}",
+            callback_data=f"adm:reissue:{sub['id']}",
+        )
+    builder.button(text="◀️ Назад", callback_data=f"adm:user:card:{user_id}")
     builder.adjust(1)
     return builder.as_markup()
 

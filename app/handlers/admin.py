@@ -23,11 +23,12 @@ from aiogram.types import (
 
 from app import __author__, __author_url__, __build__, __repo__, __version__
 from app.config import Config
-from app.db import Database, to_iso, utcnow
+from app.db import Database, from_iso, to_iso, utcnow
 from app.keyboards import (
     admin_kb,
     admin_order_kb,
     admin_service_kb,
+    admin_subs_reissue_kb,
     admin_ticket_kb,
     admin_user_kb,
     back_kb,
@@ -42,7 +43,13 @@ from app.keyboards import (
 from app.runtime import runtime as rt
 from app.services.claims import build_claim_link, find_claimable
 from app.services.panels import PanelError, get_panel
-from app.services.subs import complete_order, grant_subscription, notify_admins, safe_send
+from app.services.subs import (
+    complete_order,
+    grant_subscription,
+    notify_admins,
+    reissue_subscription,
+    safe_send,
+)
 from app.utils import STATUS_RU, chunks, esc, fmt_dt, human_left, make_qr_png, price
 
 log = logging.getLogger(__name__)
@@ -490,14 +497,26 @@ async def _show_user_card(target: Message | CallbackQuery, db: Database, cfg: Co
         f"Статус: {'🚫 заблокирован' if user['is_banned'] else '✅ активен'}\n"
         f"Регистрация: {fmt_dt(user['created_at'])}, последняя активность: {fmt_dt(user['last_seen_at'])}\n"
     )
+    reissue_target = None
     if active:
         sub = active[0]
+        reissue_target = int(sub["id"])
         text += (
             f"\n🟢 Подписка: <b>{esc(sub['plan_code'])}</b>, до {fmt_dt(sub['expires_at'])} "
             f"(осталось {human_left(sub['expires_at'])}), панель <code>{esc(sub['panel'])}</code>\n"
         )
     else:
         text += "\n🔴 Активной подписки нет\n"
+    if subs:
+        # Перевыдать можно и истёкший конфиг (клиент в панели жив, но ссылка сломана).
+        reissue_target = reissue_target or int(subs[0]["id"])
+        last = subs[0]
+        if not active:
+            text += (
+                f"⚙️ Последняя подписка #{last['id']}: <b>{esc(last['plan_code'])}</b>, "
+                f"{STATUS_RU.get(last['status'], last['status'])}, "
+                f"панель <code>{esc(last['panel'])}</code>\n"
+            )
     if orders:
         text += "\n🧾 Последние заказы:\n"
         for order in orders:
@@ -505,7 +524,7 @@ async def _show_user_card(target: Message | CallbackQuery, db: Database, cfg: Co
                 f"#{order['id']} · {esc(order['plan_code'])} · {price(int(order['amount']), cfg.currency)} · "
                 f"{STATUS_RU.get(order['status'], order['status'])}\n"
             )
-    markup = admin_user_kb(user_id, bool(user["is_banned"]))
+    markup = admin_user_kb(user_id, bool(user["is_banned"]), reissue_sub_id=reissue_target)
     if isinstance(target, CallbackQuery):
         try:
             await target.message.edit_text(text, reply_markup=markup)
@@ -559,6 +578,27 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await call.answer()
         return
+    if action == "subs":
+        # Окно перевыдачи: подписки пользователя + кнопка «Перевыдать» для каждой.
+        subs = await db.user_subscriptions(user_id)
+        if not subs:
+            await call.answer("У пользователя нет подписок — перевыдавать нечего.", show_alert=True)
+            return
+        text = (
+            f"♻️ <b>Перевыдача конфигов</b> · пользователь <code>{user_id}</code>\n\n"
+            "Выберите подписку. Перевыдача:\n"
+            "• выпускает НОВОГО клиента панели с ТЕМИ ЖЕ тарифом, устройствами, "
+            "трафиком и остатком дней (срок не меняется);\n"
+            "• заменяет старую ссылку новой в той же подписке (второй подписки не будет);\n"
+            "• удаляет старого (сломанного) клиента панели.\n\n"
+            "⚠️ Пользователь получит новую ссылку автоматически."
+        )
+        try:
+            await call.message.edit_text(text, reply_markup=admin_subs_reissue_kb(user_id, subs))
+        except Exception:
+            await call.message.answer(text, reply_markup=admin_subs_reissue_kb(user_id, subs))
+        await call.answer()
+        return
     if action == "wipe":
         panel = get_panel(cfg, db)
         removed = 0
@@ -586,6 +626,68 @@ async def cb_grant_plan(call: CallbackQuery, db: Database, cfg: Config, bot: Bot
         await call.answer(f"Ошибка выдачи: {exc}", show_alert=True)
         return
     await call.message.edit_text(f"✅ Подписка <b>{plan_code}</b> выдана пользователю <code>{user_id}</code>.")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:reissue:"))
+async def cb_reissue(call: CallbackQuery, state: FSMContext, db: Database, cfg: Config,
+                     bot: Bot) -> None:
+    """Перевыдача подписки админом (сломанный клиент/ссылка в панели).
+
+    Двухшаговое подтверждение: первый клик показывает карточку подписки и по
+    «✅ Подтвердить» перевыдаёт — срок и тариф сохраняются, меняется только ссылка.
+    """
+    sub_id = int(call.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+
+    if data.get("reissue_confirm") == sub_id:
+        await state.update_data(reissue_confirm=None)
+        await call.answer("Выполняю перевыдачу…")
+        result = await reissue_subscription(bot, cfg, db, sub_id, actor_id=call.from_user.id)
+        if not result["ok"]:
+            await call.message.answer(f"❌ Перевыдача не выполнена: {esc(result['error'])}")
+            return
+        row = result["row"]
+        await call.message.answer(
+            f"♻️ <b>Перевыдача #{sub_id} выполнена</b>\n\n"
+            f"Пользователь: <code>{row['user_id']}</code> · тариф: <b>{esc(row['plan_code'])}</b>\n"
+            f"Срок сохранён: до {fmt_dt(row['expires_at'])} (осталось {human_left(row['expires_at'])})\n"
+            f"Клиент панели: <code>{esc(result['old_username'])}</code> → "
+            f"<code>{esc(result['new_username'])}</code>\n"
+            f"Старый клиент: {'удалён ✅' if result['client_deleted'] else 'НЕ удалён — проверьте панель ⚠️'}\n"
+            "Новая ссылка отправлена пользователю.",
+        )
+        return
+
+    sub = await db.get_subscription(sub_id)
+    if sub is None:
+        await call.answer("Подписка не найдена.", show_alert=True)
+        return
+    left_days = (from_iso(sub["expires_at"]) - utcnow()).days
+    await state.update_data(reissue_confirm=sub_id)
+    text = (
+        f"♻️ <b>Подтвердите перевыдачу подписки #{sub_id}</b>\n\n"
+        f"Пользователь: <code>{sub['user_id']}</code>\n"
+        f"Тариф: <b>{esc(sub['plan_code'])}</b> · устройств: {sub['devices']} · "
+        f"трафик: {'безлимит' if not sub['traffic_gb'] else str(sub['traffic_gb']) + ' ГБ'}\n"
+        f"Статус: {STATUS_RU.get(sub['status'], sub['status'])}, "
+        f"до {fmt_dt(sub['expires_at'])} (осталось {max(left_days, 0)} дн.)\n"
+        f"Клиент панели: <code>{esc(sub['panel_username'] or '—')}</code>\n\n"
+        "Будет выпущен новый клиент с ТЕМИ ЖЕ тарифом и остатком дней; старая "
+        "ссылка заменится новой, старый клиент панели будет удалён."
+    )
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=confirm_kb(f"adm:reissue:{sub_id}", f"adm:user:subs:{sub['user_id']}",
+                                    yes_label="✅ Подтвердить перевыдачу", no_label="✖️ Отмена"),
+        )
+    except Exception:
+        await call.message.answer(
+            text,
+            reply_markup=confirm_kb(f"adm:reissue:{sub_id}", f"adm:user:subs:{sub['user_id']}",
+                                    yes_label="✅ Подтвердить перевыдачу", no_label="✖️ Отмена"),
+        )
     await call.answer()
 
 
