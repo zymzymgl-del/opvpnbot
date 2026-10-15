@@ -91,9 +91,10 @@ async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: i
         f"{'безлимит' if not sub_row['traffic_gb'] else str(sub_row['traffic_gb']) + ' ГБ'}</b>\n\n"
     )
     if is_absolute_url(sub_url):
-        # Косметика: вместо инструкции — сама ссылка на подписку, видимая и
-        # кликабельная (текст ссылки = её адрес, а не подпись «Ссылка на подписку»).
-        text += f'🔗 <a href="{esc(sub_url)}">{esc(sub_url)}</a>'
+        # Косметика: сама ссылка — моноширинным блоком (<code>), чтобы тап по ней
+        # КОПИРОВАЛ адрес, а не открывал сайт: URL внутри <code> Telegram не
+        # превращает в ссылку. То же самое делает кнопка «🔗 Скопировать ссылку».
+        text += f"🔗 <code>{esc(sub_url)}</code>\n\nНажмите на ссылку, чтобы скопировать."
     else:
         text += "Нажмите кнопку ниже, чтобы получить QR-код и инструкцию по подключению."
     markup = subscription_kb(sub_row["id"], sub_url, sub_row["vpn_key"] or "")

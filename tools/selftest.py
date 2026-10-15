@@ -248,10 +248,10 @@ async def run() -> None:
         "devices": 2, "traffic_gb": 0,
     })
     card_text = card_bot.last_text_for(1099)
-    check("карточка: ссылка на подписку кликабельна в тексте",
-          '<a href="https://sub.example.com:2096/abc/def">' in card_text, card_text)
-    check("карточка: видно сам адрес ссылки, а не подпись к ней",
-          ">https://sub.example.com:2096/abc/def</a>" in card_text, card_text)
+    check("карточка: сама ссылка в моноширинном блоке (тап копирует)",
+          "<code>https://sub.example.com:2096/abc/def</code>" in card_text, card_text)
+    check("карточка: ссылка не открывается тапом (нет <a href>)",
+          "<a href=" not in card_text, card_text)
     check("карточка: старая подсказка про кнопки убрана",
           "Нажмите кнопку ниже" not in card_text, card_text)
 
@@ -265,7 +265,8 @@ async def run() -> None:
     check("карточка без полного URL: остаётся подсказка про кнопки",
           "Нажмите кнопку ниже" in rel_card_text, rel_card_text)
     check("карточка без полного URL: битой ссылки в тексте нет",
-          "<a href=" not in rel_card_text, rel_card_text)
+          "/hvpa9knwot91fkxb" not in rel_card_text and "<a href=" not in rel_card_text,
+          rel_card_text)
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.
