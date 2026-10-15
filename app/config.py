@@ -109,6 +109,7 @@ def _xui_inbound_ids() -> tuple[int, ...]:
 class Config:
     # --- Telegram ---
     bot_token: str
+    telegram_proxy: str
     admin_ids: tuple[int, ...]
     support_username: str
     news_channel_url: str
@@ -211,6 +212,7 @@ class Config:
 def load_config() -> Config:
     cfg = Config(
         bot_token=_str("BOT_TOKEN"),
+        telegram_proxy=_str("TELEGRAM_PROXY"),
         admin_ids=_ints("ADMIN_IDS") or _ints("ADMIN_CHAT_ID"),
         support_username=_str("SUPPORT_USERNAME", "@support").lstrip("@"),
         news_channel_url=_str("NEWS_CHANNEL_URL"),
