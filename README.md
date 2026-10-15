@@ -211,8 +211,11 @@ WEBHOOK_TRUST_PROXY=true     # бот за nginx — обязательно, и�
 # бот сам вызывает setWebhook при старте). Путь НЕ должен совпадать с WEBHOOK_PATH.
 TG_WEBHOOK_ENABLED=true
 TG_WEBHOOK_URL=https://tg1.openplanetvpn.com/tg/webhook
-TG_WEBHOOK_SECRET=<openssl rand -hex 32>
 TG_WEBHOOK_FAST_ACK=true     # 200 Telegram сразу, обработка в фоне (рекомендуется)
+# Секрет — сгенерируйте свой и допишите его в .env (значение ниже оставлено пустым
+# намеренно: если вписать пример как есть, бот не стартует — «задан неверно»):
+#   SECRET=$(openssl rand -hex 32) && echo "TG_WEBHOOK_SECRET=$SECRET" | sudo tee -a /srv/opvpnbot/.env
+TG_WEBHOOK_SECRET=
 ```
 
 Тот же адрес укажите в кабинете ЮKassa (**Интеграция → HTTP-уведомления**, событие
