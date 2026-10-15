@@ -44,9 +44,16 @@ os.environ.update({
 })
 
 from app import __build__  # noqa: E402
-from app.config import load_config, validate  # noqa: E402
+from app.config import is_absolute_url, load_config, validate  # noqa: E402
 from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
-from app.keyboards import admin_service_kb, main_menu, payment_methods_kb, plans_kb, profile_kb  # noqa: E402
+from app.keyboards import (  # noqa: E402
+    admin_service_kb,
+    main_menu,
+    payment_methods_kb,
+    plans_kb,
+    profile_kb,
+    subscription_kb,
+)
 from app.logctx import current_request_id, log_context  # noqa: E402
 from app.runtime import runtime as rt  # noqa: E402
 from app.services.panels import (  # noqa: E402
@@ -200,6 +207,32 @@ async def run() -> None:
     check("кнопки обслуживания: перезапуск бота и Xray",
           {"🔄 Перезапустить бота", "♻️ Перезапустить Xray"} <= labels, str(labels))
     check("XuiPanel умеет перезапускать Xray", callable(getattr(XuiPanel, "restart_xray", None)))
+
+    print("\n1e. XUI_SUB_BASE: только полный URL (путь без хоста Telegram отклоняет)")
+    check("полный URL подписки принят", is_absolute_url("https://sub.example.com:2096/abc/def"))
+    check("путь без хоста отклонён", not is_absolute_url("/hvpa9knwot91fkxb"))
+    check("хост без схемы отклонён", not is_absolute_url("sub.example.com:2096/abc"))
+    check("пустое значение не считается URL", not is_absolute_url(""))
+    check("корректный XUI_SUB_BASE не даёт ошибок конфигурации",
+          validate(dataclasses.replace(cfg, xui_sub_base="https://sub.example.com:2096/abc")) == [])
+    bad_sub = validate(dataclasses.replace(cfg, xui_sub_base="/hvpa9knwot91fkxb"))
+    check("XUI_SUB_BASE без хоста — ошибка конфигурации",
+          any("XUI_SUB_BASE" in p for p in bad_sub), "; ".join(bad_sub))
+    check("пустой XUI_SUB_BASE допустим (прямые конфиги)",
+          validate(dataclasses.replace(cfg, xui_sub_base="")) == [])
+    # Кнопка-ссылка только для абсолютного URL: иначе Telegram отклоняет отправку
+    # карточки целиком («URL host is empty»), и пользователь не видит ничего.
+    abs_kb = subscription_kb(1, "https://sub.example.com:2096/abc", "vless://x", "sup")
+    abs_urls = [b.url for row in abs_kb.inline_keyboard for b in row if getattr(b, "url", None)]
+    check("карточка с полным URL: есть кнопка-ссылка",
+          "https://sub.example.com:2096/abc" in abs_urls, str(abs_urls))
+    rel_kb = subscription_kb(1, "/hvpa9knwot91fkxb/d14e3ae64c00b83c", "vless://x", "sup")
+    rel_urls = [b.url for row in rel_kb.inline_keyboard for b in row if getattr(b, "url", None)]
+    rel_cbs = {b.callback_data for row in rel_kb.inline_keyboard for b in row}
+    check("относительный URL в кнопку не попадает",
+          not any(u.startswith("/") for u in rel_urls), str(rel_urls))
+    check("карточка при этом собирается (копирование/QR на месте)",
+          {"sub:copy:1", "sub:qr:1"} <= rel_cbs, str(rel_cbs))
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.

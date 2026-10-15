@@ -105,6 +105,18 @@ def _xui_inbound_ids() -> tuple[int, ...]:
     return (single,) if single else ()
 
 
+def is_absolute_url(value: str) -> bool:
+    """True, если значение — абсолютный http(s)-URL с непустым хостом.
+
+    Нужно для ссылок, которые уезжают в Telegram (URL-кнопки, web_app):
+    относительный путь вроде ``/hvpa9knwot91fkxb/d14e3ae64c00b83c`` Telegram
+    отклоняет целиком («URL host is empty»), и тогда не отправляется всё
+    сообщение с клавиатурой (карточка подписки не появляется у пользователя).
+    """
+    parts = urlsplit(value or "")
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
 @dataclass(frozen=True)
 class Config:
     # --- Telegram ---
@@ -296,6 +308,14 @@ def validate(cfg: Config) -> list[str]:
         if cfg.xui_ca_file and not Path(cfg.xui_ca_file).is_file():
             problems.append(
                 f"XUI_CA_FILE={cfg.xui_ca_file!r} — файл не найден (нужен PEM-сертификат CA)."
+            )
+        if cfg.xui_sub_base and not is_absolute_url(cfg.xui_sub_base):
+            problems.append(
+                f"XUI_SUB_BASE={cfg.xui_sub_base!r} — нужен ПОЛНЫЙ адрес подписочного "
+                "сервера панели, вместе со схемой и хостом, например "
+                "https://panel.example.com:2096/hvpa9knwot91fkxb (в панели это «Subscription "
+                "URL»). Один путь без хоста не годится: Telegram отклоняет такие ссылки "
+                "в кнопках («URL host is empty») и карточка подписки не отправляется вовсе."
             )
     if cfg.claim_enabled and not cfg.claim_secret:
         problems.append("CLAIM_ENABLED=true, но не задан CLAIM_SECRET — ссылки привязки нельзя подписать.")

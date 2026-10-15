@@ -11,6 +11,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.config import is_absolute_url
 from app.utils import human_gb, human_left, price
 
 BTN_BUY = "🛒 Купить VPN"
@@ -103,11 +104,12 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
     builder = InlineKeyboardBuilder()
     # Для удалённых/отключённых подписок конфиг не выдаём: только статус и продление.
     if status not in ("disabled", "deleted"):
-        if sub_url:
+        # Кнопку-ссылку ставим ТОЛЬКО для абсолютного URL: относительный путь
+        # (например /hvpa9knwot91fkxb/subId — XUI_SUB_BASE задан без хоста)
+        # Telegram отклоняет, и тогда не уходит вся карточка целиком.
+        if sub_url and is_absolute_url(sub_url):
             builder.button(text="📄 Ссылка подписки", url=sub_url)
-            builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
-        else:
-            builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
+        builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
         builder.button(text="📷 QR-код", callback_data=f"sub:qr:{sub_id}")
         builder.button(text="📲 Как подключиться", callback_data=f"sub:howto:{sub_id}")
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
