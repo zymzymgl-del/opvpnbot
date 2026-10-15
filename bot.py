@@ -24,6 +24,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
@@ -118,7 +119,18 @@ async def main() -> None:
     await db.connect()
     await runtime.load(db, cfg)
 
-    bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Прокси для Telegram (SOCKS5/HTTP). Указывается в .env как
+    # TELEGRAM_PROXY=...; fallback на PAYMENTS_PROXY, если задан только он.
+    # Пусто — ходим напрямую.
+    tg_proxy = (cfg.telegram_proxy or cfg.payments_proxy or "").strip()
+    session = AiohttpSession(proxy=tg_proxy) if tg_proxy else None
+    if session is not None:
+        log.info("Telegram-транспорт: через прокси %s",
+                 tg_proxy.split("@", 1)[-1])  # хост:порт без учётки
+
+    bot = Bot(cfg.bot_token,
+              session=session,
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
     log.info("Бот @%s (id=%s), версия %s; основа — DF VPN Bot (@%s, %s)", me.username, me.id, __build__, __author__, __author_url__)
 

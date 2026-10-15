@@ -2,6 +2,8 @@
 aiogram==3.31.0
 aiosqlite==0.22.1
 aiohttp==3.14.3
+# Прокси SOCKS5/HTTP для Telegram и платёжного API (TELEGRAM_PROXY / PAYMENTS_PROXY)
+aiohttp-socks==0.12.0
 python-dotenv==1.2.2
 
 # QR-коды конфигураций для клиентов
