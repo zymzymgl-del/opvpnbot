@@ -12,7 +12,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.config import Config
+from app.config import Config, is_absolute_url
 from app.db import Database, from_iso, to_iso, utcnow
 from app.keyboards import subscription_kb
 from app.logctx import set_request_id
@@ -89,9 +89,13 @@ async def send_subscription_card(bot: Bot, cfg: Config, db: Database, user_id: i
         f"(осталось {human_left(sub_row['expires_at'])})\n"
         f"Устройств: <b>{sub_row['devices']}</b>, трафик: <b>"
         f"{'безлимит' if not sub_row['traffic_gb'] else str(sub_row['traffic_gb']) + ' ГБ'}</b>\n\n"
-        "Нажмите кнопку ниже, чтобы получить QR-код и инструкцию по подключению."
     )
-    markup = subscription_kb(sub_row["id"], sub_url, sub_row["vpn_key"] or "", cfg.support_username)
+    if is_absolute_url(sub_url):
+        # Косметика: вместо инструкции — кликабельная ссылка на подписку прямо в тексте.
+        text += f'📄 <a href="{esc(sub_url)}">Ссылка на подписку</a>'
+    else:
+        text += "Нажмите кнопку ниже, чтобы получить QR-код и инструкцию по подключению."
+    markup = subscription_kb(sub_row["id"], sub_url, sub_row["vpn_key"] or "")
     await ui.ui_text(bot, user_id, text, markup)
 
     if with_qr and link:

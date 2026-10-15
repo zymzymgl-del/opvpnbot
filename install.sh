@@ -276,7 +276,7 @@ collect_config() {
   # Подтянуть текущие значения из .env, чтобы при --yes/--reconfigure не
   # спрашивать по второму разу то, что уже есть.
   local __k
-  for __k in BOT_TOKEN ADMIN_IDS BOT_NAME SUPPORT_USERNAME PAYMENT_METHODS \
+  for __k in BOT_TOKEN ADMIN_IDS BOT_NAME PAYMENT_METHODS \
              VPN_PANEL XUI_URL XUI_API_TOKEN XUI_USERNAME XUI_PASSWORD \
              XUI_INBOUND_IDS XUI_PUBLIC_HOST CLAIM_ENABLED CLAIM_SECRET \
              YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY \
@@ -291,7 +291,6 @@ collect_config() {
   ask_required BOT_TOKEN "Токен бота от @BotFather"
   ask_required ADMIN_IDS "Ваш Telegram ID (из @userinfobot), можно несколько через запятую"
   ask BOT_NAME "Название сервиса" "OPVPN"
-  ask SUPPORT_USERNAME "Поддержка, без @" "support"
   ask PAYMENT_METHODS "Способы оплаты (через запятую)" "yookassa"
 
   printf '\n%s\n' "${c_blu}=== Выдача ключей ===${c_reset}"
@@ -364,7 +363,6 @@ write_env() {
   set_env "$env_file" BOT_TOKEN "$BOT_TOKEN"
   set_env "$env_file" ADMIN_IDS "$ADMIN_IDS"
   put_env "$env_file" BOT_NAME "${BOT_NAME:-}"
-  put_env "$env_file" SUPPORT_USERNAME "${SUPPORT_USERNAME:-}"
   put_env "$env_file" PAYMENT_METHODS "${PAYMENT_METHODS:-}"
   set_env "$env_file" VPN_PANEL "$VPN_PANEL"
 

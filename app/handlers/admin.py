@@ -21,7 +21,6 @@ from aiogram.types import (
     Message,
 )
 
-from app import __author__, __author_url__, __build__, __repo__, __version__
 from app.config import Config
 from app.db import Database, from_iso, to_iso, utcnow
 from app.keyboards import (
@@ -133,24 +132,6 @@ async def cb_admin_panel(call: CallbackQuery, db: Database, cfg: Config) -> None
         await call.message.edit_text(await _panel_text(db, cfg), reply_markup=admin_kb(stats, stats["tickets_open"]))
     except Exception:
         await call.message.answer(await _panel_text(db, cfg), reply_markup=admin_kb(stats, stats["tickets_open"]))
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm:about")
-async def cb_about(call: CallbackQuery, cfg: Config) -> None:
-    # Версию показываем всегда, сборку — только когда она отличается от semver
-    # (в релизной сборке это лишний шум, в дев/деплое — нужная информация).
-    build = "" if __build__ == __version__ else f" · сборка <code>{esc(__build__)}</code>"
-    await call.message.edit_text(
-        f"ℹ️ <b>{esc(cfg.bot_name)}</b> v{esc(__version__)}{build}\n\n"
-        f"🧩 Основа: DF VPN Bot, автор <a href=\"{__author_url__}\">@{__author__}</a>\n"
-        "Стек: aiogram 3, SQLite, aiohttp\n"
-        f"Панель выдачи: <code>{cfg.panel}</code>\n"
-        f"Способы оплаты: <code>{', '.join(cfg.payment_methods)}</code>\n"
-        f"Вебхуки ЮKassa: <code>{'включены' if cfg.webhook_enabled else 'выключены'}</code>\n\n"
-        f"Исходники: <code>{__repo__}</code>",
-        reply_markup=back_kb("adm:panel", "◀️ Назад"),
-    )
     await call.answer()
 
 

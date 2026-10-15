@@ -123,7 +123,6 @@ class Config:
     bot_token: str
     telegram_proxy: str
     admin_ids: tuple[int, ...]
-    support_username: str
     news_channel_url: str
     required_channels: tuple[str, ...]
     bot_name: str
@@ -230,7 +229,6 @@ def load_config() -> Config:
         bot_token=_str("BOT_TOKEN"),
         telegram_proxy=_str("TELEGRAM_PROXY"),
         admin_ids=_ints("ADMIN_IDS") or _ints("ADMIN_CHAT_ID"),
-        support_username=_str("SUPPORT_USERNAME", "@support").lstrip("@"),
         news_channel_url=_str("NEWS_CHANNEL_URL"),
         required_channels=_list("REQUIRED_CHANNELS"),
         bot_name=_str("BOT_NAME", "OPVPN"),

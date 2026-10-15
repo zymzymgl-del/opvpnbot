@@ -52,6 +52,7 @@ from app.services.subs import (
     payment_ids_of,
     renewal_available,
     renewal_window_days,
+    send_subscription_card,
 )
 from app.utils import (
     METHOD_RU,
@@ -618,6 +619,24 @@ async def _render_checkout(call: CallbackQuery, cfg: Config, order_id: int, amou
                           else back_kb(f"order:show:{order_id}"))
 
 
+async def _show_granted_subscription(call: CallbackQuery, db: Database, cfg: Config, *,
+                                     header: str = "✅ <b>Оплата получена — подписка готова!</b>") -> None:
+    """Показывает карточку выданной подписки в текущем окне.
+
+    ``complete_order`` уже отправил карточку через ``ui_text``, но следующая
+    строка затирала её сухим текстом «ключ отправлен отдельным сообщением» —
+    и пользователь оставался без ссылки, QR и кнопок (карточка в режиме одного
+    окна и есть то самое «отдельное сообщение»). Поэтому после выдачи окно
+    перерисовываем именно карточкой. Если подписки почему-то нет — остаётся
+    прежний текстовый результат с кнопкой возврата.
+    """
+    sub = await db.active_subscription(call.from_user.id)
+    if sub is None:
+        await _edit_or_answer(call, header, back_kb())
+        return
+    await send_subscription_card(call.bot, cfg, db, call.from_user.id, sub, header=header)
+
+
 @router.callback_query(F.data.startswith("pay:"))
 async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=None) -> None:
     parts = call.data.split(":")
@@ -668,8 +687,8 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                     back_kb(f"order:show:{order_id}", "◀️ К заказу"),
                 )
                 return
-            await _edit_or_answer(call, "✅ Подписка выдана! Ключ отправлен отдельным сообщением.",
-                                  back_kb())
+            await _show_granted_subscription(call, db, cfg,
+                                             header="✅ <b>Подписка выдана!</b>")
             return
         paid_id: str | None = None
         if yk is not None:
@@ -688,8 +707,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                     back_kb(f"order:show:{order_id}", "◀️ К заказу"),
                 )
                 return
-            await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
-                                  back_kb())
+            await _show_granted_subscription(call, db, cfg)
         else:
             await _edit_or_answer(
                 call,
@@ -737,8 +755,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                         back_kb(f"order:show:{order_id}", "◀️ К заказу"),
                     )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
-                                      back_kb())
+                await _show_granted_subscription(call, db, cfg)
                 return
         # Один заказ — один счёт: если у заказа уже есть привязанный платёж,
         # переспрашиваем его статус в API и переиспользуем ту же ссылку.
@@ -770,8 +787,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                         back_kb(f"order:show:{order_id}", "◀️ К заказу"),
                     )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
-                                      back_kb())
+                await _show_granted_subscription(call, db, cfg)
                 return
             if yk.payment_is_payable(payment):
                 stored_url = order["payment_url"] or ""
@@ -826,8 +842,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
                         back_kb(f"order:show:{order_id}", "◀️ К заказу"),
                     )
                     return
-                await _edit_or_answer(call, "✅ Оплата получена! Ключ отправлен отдельным сообщением.",
-                                      back_kb())
+                await _show_granted_subscription(call, db, cfg)
                 return
             # Гонка: чужой клик уже привязал счёт — показываем ту же ссылку.
             await _render_checkout(call, cfg, order_id, amount,
@@ -880,7 +895,7 @@ async def _render_sub_card(call: CallbackQuery, db: Database, cfg: Config, sub_i
         f"{'безлимит' if not sub['traffic_gb'] else str(sub['traffic_gb']) + ' ГБ'}\n"
 
     )
-    markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "", cfg.support_username)
+    markup = subscription_kb(sub_id, sub["sub_url"], sub["vpn_key"] or "")
     await _edit_or_answer(call, text, markup)
     return True
 
@@ -1108,7 +1123,7 @@ async def cb_support(call: CallbackQuery, db: Database, cfg: Config, state: FSMC
     )
     if ticket is not None:
         text += f"\n\n💬 У вас есть открытое обращение #{ticket['id']}."
-    await _edit_or_answer(call, text, support_kb(ticket is not None, cfg.support_username))
+    await _edit_or_answer(call, text, support_kb(ticket is not None))
     await call.answer()
 
 

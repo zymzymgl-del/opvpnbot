@@ -99,7 +99,7 @@ def profile_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_username: str = "",
+def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str,
                     status: str = "active") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     # Для удалённых/отключённых подписок конфиг не выдаём: только статус и продление.
@@ -113,8 +113,8 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
         builder.button(text="📷 QR-код", callback_data=f"sub:qr:{sub_id}")
         builder.button(text="📲 Как подключиться", callback_data=f"sub:howto:{sub_id}")
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
-    if support_username:
-        builder.button(text="🆘 Не работает", url=f"https://t.me/{support_username}")
+    # Внешней кнопки «🆘 Не работает» (ссылка на аккаунт поддержки в Telegram)
+    # здесь нет: поддержка ведётся в боте, на своём экране «🆘 Поддержка».
     builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
     return builder.as_markup()
@@ -144,12 +144,12 @@ def checkout_kb(confirmation_url: str, order_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def support_kb(has_open_ticket: bool, support_username: str = "") -> InlineKeyboardMarkup:
+def support_kb(has_open_ticket: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✍️ Новое обращение" if not has_open_ticket else "💬 Продолжить обращение",
                    callback_data="support:new")
-    if support_username:
-        builder.button(text="✈️ Написать в Telegram", url=f"https://t.me/{support_username}")
+    # Внешней кнопки «✈️ Написать в Telegram» (ссылка на аккаунт поддержки) нет:
+    # поддержка ведётся в этом же чате — обращениями в боте.
     builder.button(text="📖 FAQ", callback_data="support:faq")
     builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
@@ -175,7 +175,6 @@ def admin_kb(stats: dict, tickets_open: int = 0) -> InlineKeyboardMarkup:
         if badge:
             text = f"{text} ({badge})"
         builder.button(text=text, callback_data=data)
-    builder.button(text="ℹ️ О боте", callback_data="adm:about")
     builder.button(text="🏠 В меню", callback_data="menu:main")
     builder.adjust(2)
     return builder.as_markup()
@@ -319,7 +318,6 @@ def settings_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 Тарифы", callback_data="adm:settings:plans")
     builder.button(text="⚙️ Тариф пробного периода", callback_data="adm:settings:trial")
-    builder.button(text="ℹ️ О боте / версия", callback_data="adm:about")
     builder.button(text="◀️ Назад", callback_data="adm:panel")
     builder.adjust(1)
     return builder.as_markup()

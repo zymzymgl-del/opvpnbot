@@ -76,6 +76,7 @@ from app.services.subs import (  # noqa: E402
     reissue_subscription,
     renewal_available,
     send_reminders,
+    send_subscription_card,
 )
 
 PASSED: list[str] = []
@@ -222,17 +223,47 @@ async def run() -> None:
           validate(dataclasses.replace(cfg, xui_sub_base="")) == [])
     # Кнопка-ссылка только для абсолютного URL: иначе Telegram отклоняет отправку
     # карточки целиком («URL host is empty»), и пользователь не видит ничего.
-    abs_kb = subscription_kb(1, "https://sub.example.com:2096/abc", "vless://x", "sup")
+    abs_kb = subscription_kb(1, "https://sub.example.com:2096/abc", "vless://x")
     abs_urls = [b.url for row in abs_kb.inline_keyboard for b in row if getattr(b, "url", None)]
     check("карточка с полным URL: есть кнопка-ссылка",
           "https://sub.example.com:2096/abc" in abs_urls, str(abs_urls))
-    rel_kb = subscription_kb(1, "/hvpa9knwot91fkxb/d14e3ae64c00b83c", "vless://x", "sup")
+    rel_kb = subscription_kb(1, "/hvpa9knwot91fkxb/d14e3ae64c00b83c", "vless://x")
     rel_urls = [b.url for row in rel_kb.inline_keyboard for b in row if getattr(b, "url", None)]
     rel_cbs = {b.callback_data for row in rel_kb.inline_keyboard for b in row}
     check("относительный URL в кнопку не попадает",
           not any(u.startswith("/") for u in rel_urls), str(rel_urls))
     check("карточка при этом собирается (копирование/QR на месте)",
           {"sub:copy:1", "sub:qr:1"} <= rel_cbs, str(rel_cbs))
+    # Внешних ссылок на аккаунт поддержки в карточке нет: поддержка ведётся
+    # в боте (тикеты на экране «🆘 Поддержка»), а не в личке Telegram.
+    check("в карточке нет внешней кнопки поддержки (t.me)",
+          not any("t.me" in (u or "") for u in abs_urls), str(abs_urls))
+
+    # Косметика карточки: вместо текста «Нажмите кнопку ниже…» должна стоять
+    # кликабельная ссылка на подписку, а при относительном пути — прежняя подсказка.
+    card_bot = FakeBot()
+    await send_subscription_card(card_bot, cfg, db, 1099, {
+        "id": 777, "vpn_key": "vless://x", "sub_url": "https://sub.example.com:2096/abc/def",
+        "plan_code": "1m", "expires_at": to_iso(utcnow() + timedelta(days=30)),
+        "devices": 2, "traffic_gb": 0,
+    })
+    card_text = card_bot.last_text_for(1099)
+    check("карточка: ссылка на подписку кликабельна в тексте",
+          '<a href="https://sub.example.com:2096/abc/def">' in card_text, card_text)
+    check("карточка: старая подсказка про кнопки убрана",
+          "Нажмите кнопку ниже" not in card_text, card_text)
+
+    rel_card_bot = FakeBot()
+    await send_subscription_card(rel_card_bot, cfg, db, 1098, {
+        "id": 778, "vpn_key": "vless://x", "sub_url": "/hvpa9knwot91fkxb/d14e3ae64c00b83c",
+        "plan_code": "1m", "expires_at": to_iso(utcnow() + timedelta(days=30)),
+        "devices": 2, "traffic_gb": 0,
+    })
+    rel_card_text = rel_card_bot.last_text_for(1098)
+    check("карточка без полного URL: остаётся подсказка про кнопки",
+          "Нажмите кнопку ниже" in rel_card_text, rel_card_text)
+    check("карточка без полного URL: битой ссылки в тексте нет",
+          "<a href=" not in rel_card_text, rel_card_text)
 
     # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.
@@ -574,10 +605,14 @@ async def run() -> None:
     check("ошибка API обрабатывается", await client.is_paid("pay-x", 150) is False)
 
     print("\n11. Вебхук ЮKassa: разбор уведомления")
-    from app.webhook import YOOKASSA_NETS, _ip_allowed, _order_by_metadata
+    from app.webhook import YOOKASSA_NETS, _ip_allowed, _is_loopback, _order_by_metadata
     check("IP ЮKassa из белого списка разрешён", _ip_allowed("185.71.76.10"))
     check("посторонний IP отклонён", not _ip_allowed("8.8.8.8"))
     check("диапазоны IP заданы", len(YOOKASSA_NETS) >= 6)
+    # Диагностика частой ошибки: бот за nginx, а WEBHOOK_TRUST_PROXY=false.
+    check("127.0.0.1 распознаётся как reverse-proxy", _is_loopback("127.0.0.1"))
+    check("::1 распознаётся как reverse-proxy", _is_loopback("::1"))
+    check("IP ЮKassa не считается reverse-proxy", not _is_loopback("185.71.76.10"))
     recovered = await _order_by_metadata(db, {"metadata": {"order_id": str(order2)}})
     check("заказ восстанавливается по metadata.order_id платежа",
           recovered is not None and int(recovered["id"]) == order2)
@@ -1076,6 +1111,18 @@ async def run() -> None:
           dup_row["status"] == "paid" and dup_row["payment_id"]
           and any("Оплата получена" in t for t, _ in done_call.edits), dup_row["status"])
     check("выдана ровно одна подписка", len(subs_8001) == 1, str(len(subs_8001)))
+    # Косметика выдачи: карточка подписки и сухой текст пишутся в ОДНО окно,
+    # поэтому текст «ключ отправлен отдельным сообщением» затирал карточку, и
+    # пользователь оставался без ссылки, QR и кнопок. Проверяем, что в окне
+    # осталась именно карточка с кнопками конфига.
+    card_markup = done_call.edits[-1][1] if done_call.edits else None
+    card_cbs = {b.callback_data for row in (card_markup.inline_keyboard if card_markup else [])
+                for b in row if getattr(b, "callback_data", None)}
+    check("после оплаты в окне карточка подписки (кнопки конфига)",
+          any(str(cb).startswith("sub:copy:") for cb in card_cbs), str(card_cbs))
+    check("сухой текст «отдельным сообщением» не показывается",
+          not any("отдельным сообщением" in t for t, _ in done_call.edits),
+          str([t[:60] for t, _ in done_call.edits]))
 
     # Просроченный счёт: следующий клик выпускает новый (слот освобождён)
     await db.ensure_user(8002, "stale", "Просрок")

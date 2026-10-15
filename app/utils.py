@@ -123,10 +123,6 @@ def apps_instructions(link: str, sub_url: str | None, devices: int) -> str:
     )
 
 
-def support_hint(support_username: str) -> str:
-    return f"Поддержка: @{support_username}" if support_username else ""
-
-
 def now_plus(days: int) -> datetime:
     return utcnow() + timedelta(days=days)
 

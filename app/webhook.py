@@ -67,6 +67,14 @@ def _ip_allowed(remote: str) -> bool:
     return False
 
 
+def _is_loopback(remote: str) -> bool:
+    """True, если запрос пришёл от локального reverse-proxy (127.0.0.1/::1)."""
+    try:
+        return ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        return False
+
+
 def _client_ip(request: web.Request, trust_proxy: bool) -> str:
     """IP источника запроса.
 
@@ -143,7 +151,18 @@ def build_webhook_app(cfg: Config, db: Database, bot: Bot, yk: YooKassaClient | 
     async def _process_yookassa(request: web.Request) -> web.Response:
         remote = _client_ip(request, cfg.webhook_trust_proxy)
         if not _ip_allowed(remote):
-            log.warning("Вебхук ЮKassa отклонён: IP %s вне разрешённых диапазонов", remote)
+            if _is_loopback(remote) and not cfg.webhook_trust_proxy:
+                # Частая ошибка конфигурации: бот слушает localhost, а перед ним nginx.
+                # Тогда remote = 127.0.0.1 и без доверия к X-Forwarded-For все вебхуки
+                # получают 403, хотя в кабинете ЮKassa всё настроено верно.
+                log.warning(
+                    "Вебхук ЮKassa отклонён: IP %s — это адрес reverse-proxy, а не ЮKassa. "
+                    "Бот за nginx требует WEBHOOK_TRUST_PROXY=true (nginx уже передаёт "
+                    "X-Forwarded-For); задайте его в .env и перезапустите бота",
+                    remote,
+                )
+            else:
+                log.warning("Вебхук ЮKassa отклонён: IP %s вне разрешённых диапазонов", remote)
             return web.Response(status=403, text="forbidden")
 
         raw = await request.text()
