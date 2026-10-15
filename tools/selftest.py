@@ -700,6 +700,85 @@ async def run() -> None:
     check("неверный секрет отклоняется", not _secret_ok("b" * 32, "a" * 32))
     check("пустой ожидаемый секрет не пропускает запрос", not _secret_ok("", ""))
 
+    # 13c-2. Таймаут запросов к Telegram API (TG_REQUEST_TIMEOUT): на медленном
+    # канале/прокси 60 с не хватает, и апдейты падают с TelegramNetworkError.
+    from aiogram.client.session.aiohttp import AiohttpSession as _TgSession
+    from aiogram.client.session.base import DEFAULT_TIMEOUT as _TG_DEFAULT
+
+    from app.config import _float as _cfg_float
+
+    check("таймаут Telegram по умолчанию совпадает с дефолтом aiogram",
+          _TG_DEFAULT == 60.0 and _cfg_float("TG_REQUEST_TIMEOUT", _TG_DEFAULT) == 60.0)
+    os.environ["TG_REQUEST_TIMEOUT"] = "90"
+    try:
+        check("TG_REQUEST_TIMEOUT читается из окружения",
+              _cfg_float("TG_REQUEST_TIMEOUT", _TG_DEFAULT) == 90.0)
+    finally:
+        os.environ.pop("TG_REQUEST_TIMEOUT", None)
+    os.environ["TG_REQUEST_TIMEOUT"] = "мусор"
+    try:
+        check("мусор в TG_REQUEST_TIMEOUT не роняет конфиг (берётся дефолт)",
+              _cfg_float("TG_REQUEST_TIMEOUT", _TG_DEFAULT) == 60.0)
+    finally:
+        os.environ.pop("TG_REQUEST_TIMEOUT", None)
+    _tg_session = _TgSession(timeout=90)
+    check("значение доезжает до HTTP-сессии бота", _tg_session.timeout == 90)
+
+    # 13c-3. TelegramNetworkError (сеть до api.telegram.org) — не будим админов.
+    import aiogram.methods as _tg_methods
+    from aiogram.exceptions import TelegramNetworkError
+
+    import app.middlewares as _mw_mod
+
+    _spam: list[str] = []
+    _orig_notify = _mw_mod.notify_admins
+
+    async def _spy_notify(_bot, _cfg, text, *a, **kw):
+        _spam.append(text)
+
+    from aiogram.types import CallbackQuery as _CbQuery, Chat as _Chat, Message as _Message, User as _User
+
+    _answers: list[str] = []
+
+    class _StubCall(_CbQuery):
+        """Ненастоящий только по транспорту: ответ на нажатие пишем в _answers.
+
+        Наследуемся от CallbackQuery, иначе мидлварь не увидит нажатие
+        (isinstance-проверка) и ветка уведомления пользователя не выполнится.
+        """
+
+        def __init__(self) -> None:
+            super().__init__(
+                id="42",
+                from_user=_User(id=777, is_bot=False, first_name="Тест"),
+                chat_instance="chat-instance",
+                data="menu:main",
+                message=_Message(message_id=7, date=utcnow(), chat=_Chat(id=777, type="private")),
+            )
+
+        async def answer(self, text="", **kw):
+            _answers.append(text)
+
+    async def _raise_net(_event, _data):
+        raise TelegramNetworkError(method=_tg_methods.GetMe(), message="Request timeout error")
+
+    async def _raise_boom(_event, _data):
+        raise RuntimeError("boom")
+
+    _mw = _mw_mod.ErrorsMiddleware(cfg)
+    _mw_mod.notify_admins = _spy_notify
+    try:
+        _net_res = await _mw(_raise_net, _StubCall(), {"bot": bot})
+        check("сетевой сбой Telegram не спамит админов", _net_res is None and not _spam,
+              "; ".join(_spam))
+        check("пользователю предложено повторить",
+              any("не отвечает" in a for a in _answers), str(_answers))
+        await _mw(_raise_boom, _StubCall(), {"bot": bot})
+        check("обычная ошибка по-прежнему уходит админам",
+              any("Ошибка в боте" in s for s in _spam), str(_spam))
+    finally:
+        _mw_mod.notify_admins = _orig_notify
+
     # 13d. SQL-инъекции: внешние значения (включая поля вебхука) идут только
     # параметрами; имена столбцов — из белых списков. Проверяем «боевыми» строками.
     injected = "x' OR '1'='1' --"

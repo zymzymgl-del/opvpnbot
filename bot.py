@@ -122,11 +122,17 @@ async def main() -> None:
     # Прокси для Telegram (SOCKS5/HTTP). Указывается в .env как
     # TELEGRAM_PROXY=...; fallback на PAYMENTS_PROXY, если задан только он.
     # Пусто — ходим напрямую.
+    # Таймаут HTTP-запросов к Telegram API — TG_REQUEST_TIMEOUT: при нестабильной
+    # сети/прокси стандартных 60 с не хватает и вылазят
+    # TelegramNetworkError("Request timeout error").
     tg_proxy = (cfg.telegram_proxy or cfg.payments_proxy or "").strip()
-    session = AiohttpSession(proxy=tg_proxy) if tg_proxy else None
-    if session is not None:
-        log.info("Telegram-транспорт: через прокси %s",
-                 tg_proxy.split("@", 1)[-1])  # хост:порт без учётки
+    session = AiohttpSession(proxy=tg_proxy or None, timeout=cfg.tg_request_timeout)
+    if tg_proxy:
+        log.info("Telegram-транспорт: через прокси %s (таймаут %s с)",
+                 tg_proxy.split("@", 1)[-1],  # хост:порт без учётки
+                 cfg.tg_request_timeout)
+    else:
+        log.info("Telegram-транспорт: напрямую (таймаут %s с)", cfg.tg_request_timeout)
 
     bot = Bot(cfg.bot_token,
               session=session,

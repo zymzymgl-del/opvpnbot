@@ -33,6 +33,22 @@ journalctl -u opvpnbot -n 200                # последние строки �
 Профилактика: `Restart=always` (systemd) / `restart: unless-stopped` (compose) + внешний
 монитор на `/healthz` (см. README → «Мониторинг и CI»).
 
+### Ошибка «TelegramNetworkError: HTTP Client says - Request timeout error»
+
+Это **не баг кода**, а сетевой сбой: HTTP-запрос к `api.telegram.org` не дождался
+ответа за отведённое время (тормозит канал до Telegram, сам API, либо прокси/VPS).
+Единичные эпизоды — норма: polling сам переживает сбои с backoff, а `ErrorsMiddleware`
+теперь такие ошибки только логирует (не будит админов пачками).
+
+Диагностика и лечение:
+
+1. Найти эпизоды по rid из уведомления: `grep 5f32b0f2 data/bot.log`.
+2. Проверить сеть с сервера: `curl -sv -o /dev/null -w '%{time_total}\n' https://api.telegram.org` —
+   если дольше ~10–20 с или соединения рвутся, чинить канал/DNS/MTU/фаервол, а не бота.
+3. Если таймауты случаются при медленном, но рабочем канале — увеличить лимит в `.env`:
+   `TG_REQUEST_TIMEOUT=90` (или 120) и перезапустить службу. Значение применяется к
+   HTTP-сессии aiogram (`AiohttpSession(timeout=...)`) при старте бота.
+
 ## 1a. Перезапуск из админки
 
 В боте: `/admin` → **«🔧 Обслуживание»**:
