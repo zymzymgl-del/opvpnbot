@@ -24,6 +24,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
@@ -118,7 +119,14 @@ async def main() -> None:
     await db.connect()
     await runtime.load(db, cfg)
 
-    bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Таймаут HTTP-запросов к Telegram API настраивается через TG_REQUEST_TIMEOUT:
+    # при нестабильной сети/прокси стандартных 60 с не хватает и вылазят
+    # TelegramNetworkError("Request timeout error").
+    bot = Bot(
+        cfg.bot_token,
+        session=AiohttpSession(timeout=cfg.tg_request_timeout),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     me = await bot.get_me()
     log.info("Бот @%s (id=%s), версия %s; основа — DF VPN Bot (@%s, %s)", me.username, me.id, __build__, __author__, __author_url__)
 

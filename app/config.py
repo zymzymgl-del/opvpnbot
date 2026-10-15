@@ -180,8 +180,12 @@ class Config:
     backup_interval_minutes: int
     backup_keep: int
     throttling_rate: float
-    terms_text: str
-    privacy_text: str
+    #: Таймаут HTTP-запросов к Telegram API (сек). Увеличьте при нестабильной
+    #: сети/прокси, иначе длинные операции падают с TelegramNetworkError
+    #: ("HTTP Client says - Request timeout error").
+    tg_request_timeout: float = field(default=60.0)
+    terms_text: str = ""
+    privacy_text: str = ""
 
     admins_only: bool = field(default=False)
 
@@ -266,6 +270,7 @@ def load_config() -> Config:
         backup_interval_minutes=_int("BACKUP_INTERVAL_MINUTES", 60),
         backup_keep=_int("BACKUP_KEEP", 48),
         throttling_rate=_float("THROTTLING_RATE", 0.6),
+        tg_request_timeout=_float("TG_REQUEST_TIMEOUT", 60.0),
         terms_text=_str("TERMS_TEXT"),
         privacy_text=_str("PRIVACY_TEXT"),
     )

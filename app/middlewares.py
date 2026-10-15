@@ -8,6 +8,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app import ui
@@ -152,6 +153,18 @@ class ErrorsMiddleware(BaseMiddleware):
                     # больше ~30 с) или по этому запросу уже отвечали — это не ошибка
                     # бота: нажатие обработано, админов будить не нужно.
                     log.info("Пропущен поздний/повторный ответ на callback-запрос: %s", exc)
+                    return None
+                if isinstance(exc, TelegramNetworkError):
+                    # «HTTP Client says - Request timeout error» и собратья: временный
+                    # сбой сети между сервером и api.telegram.org (или сам Telegram
+                    # тормозит). Это не баг кода: будить админов каждым таким эпизодом
+                    # — шум; достаточно записи в лог (по rid можно найти детали).
+                    log.warning(
+                        "Сеть до Telegram недоступна (апдейт %s): %s: %s",
+                        getattr(event, "update_id", "?"), type(exc).__name__, exc,
+                    )
+                    if isinstance(event, CallbackQuery):
+                        await ui.safe_answer(event, "⚠️ Telegram не отвечает, попробуйте ещё раз.")
                     return None
                 log.exception("Ошибка обработки апдейта: %s", exc)
                 bot = data.get("bot")
