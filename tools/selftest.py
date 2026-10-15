@@ -250,6 +250,8 @@ async def run() -> None:
     card_text = card_bot.last_text_for(1099)
     check("карточка: ссылка на подписку кликабельна в тексте",
           '<a href="https://sub.example.com:2096/abc/def">' in card_text, card_text)
+    check("карточка: видно сам адрес ссылки, а не подпись к ней",
+          ">https://sub.example.com:2096/abc/def</a>" in card_text, card_text)
     check("карточка: старая подсказка про кнопки убрана",
           "Нажмите кнопку ниже" not in card_text, card_text)
 
