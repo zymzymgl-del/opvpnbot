@@ -194,7 +194,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     greeting = (
         f"👋 <b>Добро пожаловать в {esc(cfg.bot_name)}!</b>\n\n"
         "Как это работает — 3 шага:\n"
-        "1️⃣ «🛒 Купить» → выберите тариф;\n"
+        "1️⃣ «🛒 Купить VPN» → выберите тариф;\n"
         f"2️⃣ оплатите удобным способом ({_methods_line(cfg)});\n"
         "3️⃣ получите ключ, QR и инструкцию — сразу после оплаты.\n\n"
         f"{tail}"
