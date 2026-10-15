@@ -7,18 +7,23 @@
 #
 #  Режимы:
 #      sudo bash install.sh --update        обновить код и перезапустить
+#      sudo bash install.sh --reconfigure   пересобрать .env (интерактивно или из env)
 #      sudo bash install.sh --uninstall     удалить службу (база и .env останутся)
 #      sudo bash install.sh --yes           без вопросов, значения из переменных окружения
 #      sudo bash install.sh --dir /srv/opvpnbot --no-service
 #      sudo bash install.sh --help
 #
 #  Одна команда до прода (systemd + nginx + HTTPS + firewall):
-#      sudo bash install.sh --domain bot.example.com --email you@example.com --yes
+#      sudo bash install.sh --domain bot.example.com --email you@example.com
 #
-#  При --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS, PAYMENT_METHODS,
-#  VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*, TG_WEBHOOK_*, DOMAIN, LEMC_EMAIL.
-#  Полный список — в .env.example. Пример:
-#      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 APP=... bash install.sh --yes
+#  В режиме --yes значения берутся из окружения: BOT_TOKEN, ADMIN_IDS,
+#  PAYMENT_METHODS, VPN_PANEL, XUI_*, YOOKASSA_*, WEBHOOK_*, TG_WEBHOOK_*,
+#  DOMAIN, LEMC_EMAIL. Если запущено в терминале, недостающие обязательные
+#  значения будут доспрошены. В неинтерактивном окружении (CI, < /dev/null)
+#  при --yes скрипт упадёт с подсказкой — это ожидаемо.
+#
+#  Пример:
+#      sudo BOT_TOKEN=123:AA... ADMIN_IDS=100 bash install.sh --yes
 # ============================================================================
 set -euo pipefail
 
@@ -32,27 +37,20 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 INSTALL_DIR=""
 ASSUME_YES=0
 NO_SERVICE=0
+RECONFIGURE=0
 MODE="install"   # install | update | uninstall
 
-# Публичный адрес и инфраструктура.
-# Значения по умолчанию — через ${VAR:-…}, чтобы при --yes их можно было
-# передать переменными окружения, а не только флагами.
-DOMAIN="${DOMAIN:-}"                 # домен для вебхука/healthz; пусто — nginx не настраиваем
-LEMC_EMAIL="${LEMC_EMAIL:-}"         # e-mail для Let's Encrypt
-WITH_NGINX="${WITH_NGINX:-0}"        # 1 — настроить nginx + сертификат
-WITH_FIREWALL="${WITH_FIREWALL:-true}"   # "true"/"false" — ufw с уже открытыми SSH/80/443
+DOMAIN="${DOMAIN:-}"
+LEMC_EMAIL="${LEMC_EMAIL:-}"
+WITH_NGINX="${WITH_NGINX:-0}"
+WITH_FIREWALL="${WITH_FIREWALL:-true}"
 WEBHOOK_PATH="${WEBHOOK_PATH:-/yookassa/webhook}"
 WEBHOOK_PORT="${WEBHOOK_PORT:-8080}"
 HEALTH_PORT="${HEALTH_PORT:-8081}"
-#: Путь апдейтов Telegram (должен отличаться от WEBHOOK_PATH — общий порт).
 TG_WEBHOOK_PATH="${TG_WEBHOOK_PATH:-/tg/webhook}"
-#: true/false — переводить ли апдейты Telegram на вебхук. Пусто/по умолчанию —
-#: да, если настроен nginx (HTTPS); при TG_WEBHOOK_ENABLED=true без nginx нужен
-#: свой reverse-proxy перед ботом.
 TG_WEBHOOK_ENABLED="${TG_WEBHOOK_ENABLED:-}"
 TG_WEBHOOK_URL="${TG_WEBHOOK_URL:-}"
 TG_WEBHOOK_SECRET="${TG_WEBHOOK_SECRET:-}"
-#: Доп. порты для ufw (через запятую), например порт VPN-inbound: --allow-port 8443
 EXTRA_PORTS="${EXTRA_PORTS:-}"
 
 c_reset=$'\033[0m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_blu=$'\033[34m'
@@ -63,6 +61,8 @@ die()  { printf '%s\n' "${c_red}[x]${c_reset} $*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+is_tty() { [ -t 0 ]; }
+
 usage() {
   cat <<'EOF'
 OPVPN — установщик
@@ -72,21 +72,19 @@ OPVPN — установщик
 
 Опции:
   --update            обновить код в каталоге установки и перезапустить службу
+  --reconfigure       пересобрать .env (по умолчанию — только если файла нет)
   --uninstall         остановить и удалить systemd-службу (каталог, база и .env остаются)
-  --yes               без интерактивных вопросов; значения берутся из переменных окружения
+  --yes               без интерактивных вопросов; значения берутся из переменных
+                      окружения (в терминале недостающие обязательные — доспрос)
   --no-service        не создавать systemd-службу (только venv + .env)
   --dir <путь>        каталог установки (по умолчанию — каталог запуска install.sh,
                       иначе /srv/opvpnbot)
   --domain <домен>    настроить nginx + Let's Encrypt для вебхуков и /healthz
-                      (с nginx апдейты Telegram переводятся на вебхук;
-                      выключить: TG_WEBHOOK_ENABLED=false)
   --email <адрес>     e-mail для Let's Encrypt (обязателен при --domain)
   --with-nginx        включить настройку nginx (домен спросит/возьмёт из окружения)
   --no-nginx          не трогать nginx
   --no-firewall       не включать ufw (по умолчанию включается)
-  --allow-port <п>    дополнительно открыть порт в ufw (можно через запятую;
-                      например порт VPN-inbound). Порты панели/подписки
-                      из XUI_URL и XUI_SUB_BASE открываются автоматически
+  --allow-port <п>    дополнительно открыть порт в ufw (можно через запятую)
   -h, --help          эта справка
 
 Примеры:
@@ -94,6 +92,7 @@ OPVPN — установщик
   sudo bash install.sh --domain bot.example.com --email you@example.com
   sudo bash install.sh --dir /srv/opvpnbot
   sudo bash install.sh --no-service --dir "$HOME/opvpnbot"
+  sudo bash install.sh --reconfigure
   sudo bash install.sh --update
   sudo bash install.sh --uninstall
 EOF
@@ -103,6 +102,7 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --update)      MODE="update" ;;
+    --reconfigure) RECONFIGURE=1 ;;
     --uninstall|--remove) MODE="uninstall" ;;
     --yes|-y)      ASSUME_YES=1 ;;
     --no-service)  NO_SERVICE=1 ;;
@@ -139,12 +139,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Нормализуем домен: убираем схему и путь, если вставили URL целиком.
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 
-# Каталог установки. Если --dir не задан и скрипт запущен из каталога с кодом
-# (git-клон или распакованный архив), ставим РЯДОМ С КОДОМ — иначе легко получить
-# вторую копию в /srv и два конкурирующих процесса бота.
 if [ -z "$INSTALL_DIR" ]; then
   if [ -f "$SCRIPT_DIR/bot.py" ] && [ "$SCRIPT_DIR" != "$DEFAULT_DIR" ]; then
     INSTALL_DIR="$SCRIPT_DIR"
@@ -160,37 +156,106 @@ require_root() {
   [ "$(id -u)" -eq 0 ] || die "Нужны права root. Запустите: sudo bash install.sh $*"
 }
 
+# --- .env helpers -----------------------------------------------------------
+# env_value KEY [FILE] — значение ключа из .env (пусто, если файла/ключа нет).
+env_value() {
+  local key="$1" file="${2:-$INSTALL_DIR/.env}"
+  [ -f "$file" ] || return 0
+  awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$file"
+}
+
+# seed_from_env VAR — если переменная пуста, подставить значение из .env.
+seed_from_env() {
+  local __var="$1" __cur __from_env
+  __cur="${!__var-}"
+  if [ -z "$__cur" ]; then
+    __from_env="$(env_value "$__var")"
+    if [ -n "$__from_env" ]; then
+      printf -v "$__var" '%s' "$__from_env"
+    fi
+  fi
+}
+
+set_env() {
+  local __f="$1" __k="$2" __v="$3" __tmp
+  __tmp="$(mktemp)"
+  awk -v k="$__k" -v v="$__v" '
+    BEGIN { FS = "="; found = 0 }
+    $1 == k { print k "=" v; found = 1; next }
+    { print }
+    END { if (!found) print k "=" v }
+  ' "$__f" > "$__tmp"
+  mv "$__tmp" "$__f"
+}
+
+put_env() {
+  if [ -n "${3-}" ]; then set_env "$1" "$2" "$3"; fi
+}
+
+gen_secret() {
+  if have openssl; then
+    openssl rand -hex 32
+  elif [ -r /dev/urandom ]; then
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  else
+    printf 'change-me-%s' "$(date +%s)"
+  fi
+}
+
 # --- ввод значений ----------------------------------------------------------
+# ask VAR "вопрос" [значение по умолчанию]
+#
+# Поведение:
+#   - если значение уже задано (флаг/env/seed из .env) и --yes → оставить как есть
+#   - если --yes и нет TTY → взять default (или пусто) и не спрашивать
+#   - иначе (интерактив) → спросить, подставив текущее/default
 ask() {
-  # ask VAR "вопрос" [значение по умолчанию]
   local __var="$1" __q="$2" __def="${3-}" __cur __ans __hint=""
   __cur="${!__var-}"
+
   if [ "$ASSUME_YES" -eq 1 ]; then
-    [ -n "$__cur" ] || __cur="$__def"
-    printf -v "$__var" '%s' "$__cur"
-    return 0
+    if [ -n "$__cur" ]; then
+      return 0
+    fi
+    if ! is_tty; then
+      printf -v "$__var" '%s' "$__def"
+      return 0
+    fi
+    # TTY + --yes + пусто → спрашиваем (гибридный режим)
   fi
+
   [ -n "$__def" ] && __hint=" [${__def}]"
   read -r -p "  ${__q}${__hint}: " __ans || true
   [ -n "$__ans" ] || __ans="${__cur:-$__def}"
   printf -v "$__var" '%s' "$__ans"
 }
 
+# ask_required VAR "вопрос"
 ask_required() {
-  # ask_required VAR "вопрос"
-  local __var="$1" __q="$2"
+  local __var="$1" __q="$2" __from_env
   while :; do
     ask "$__var" "$__q" ""
     if [ -n "${!__var}" ]; then return 0; fi
-    if [ "$ASSUME_YES" -eq 1 ]; then
+
+    # Fallback: может быть в .env (для --reconfigure).
+    __from_env="$(env_value "$__var")"
+    if [ -n "$__from_env" ]; then
+      printf -v "$__var" '%s' "$__from_env"
+      return 0
+    fi
+
+    if [ "$ASSUME_YES" -eq 1 ] && ! is_tty; then
       die "Не задано обязательное значение ${__var}. Передайте его через переменную окружения."
+    fi
+    if [ "$ASSUME_YES" -eq 1 ]; then
+      die "Не задано обязательное значение ${__var}. Передайте его через переменную окружения или запустите без --yes."
     fi
     warn "Значение обязательно, попробуйте ещё раз."
   done
 }
 
+# ask_choice VAR "вопрос" "по умолчанию" вариант1 вариант2 ...
 ask_choice() {
-  # ask_choice VAR "вопрос" "по умолчанию" вариант1 вариант2 ...
   local __var="$1" __q="$2" __def="$3"; shift 3
   local __opts="$*" __val __o
   while :; do
@@ -206,43 +271,22 @@ ask_choice() {
   done
 }
 
-gen_secret() {
-  if have openssl; then
-    openssl rand -hex 32
-  elif [ -r /dev/urandom ]; then
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
-  else
-    printf 'change-me-%s' "$(date +%s)"
-  fi
-}
-
-# --- .env -------------------------------------------------------------------
-set_env() {
-  # set_env FILE KEY VALUE  — заменяет строку KEY=... либо добавляет её в конец
-  local __f="$1" __k="$2" __v="$3" __tmp
-  __tmp="$(mktemp)"
-  awk -v k="$__k" -v v="$__v" '
-    BEGIN { FS = "="; found = 0 }
-    $1 == k { print k "=" v; found = 1; next }
-    { print }
-    END { if (!found) print k "=" v }
-  ' "$__f" > "$__tmp"
-  mv "$__tmp" "$__f"
-}
-
-put_env() {
-  # put_env FILE KEY VALUE — как set_env, но пропускает пустые значения
-  if [ -n "${3-}" ]; then set_env "$1" "$2" "$3"; fi
-}
-
-env_value() {
-  # env_value KEY — значение ключа из .env (пусто, если файла/ключа нет).
-  local key="$1" file="$INSTALL_DIR/.env"
-  [ -f "$file" ] || return 0
-  awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$file"
-}
-
+# --- сбор конфига -----------------------------------------------------------
 collect_config() {
+  # Подтянуть текущие значения из .env, чтобы при --yes/--reconfigure не
+  # спрашивать по второму разу то, что уже есть.
+  local __k
+  for __k in BOT_TOKEN ADMIN_IDS BOT_NAME SUPPORT_USERNAME PAYMENT_METHODS \
+             VPN_PANEL XUI_URL XUI_API_TOKEN XUI_USERNAME XUI_PASSWORD \
+             XUI_INBOUND_IDS XUI_PUBLIC_HOST CLAIM_ENABLED CLAIM_SECRET \
+             YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY \
+             WEBHOOK_ENABLED WEBHOOK_PUBLIC_URL WEBHOOK_TRUST_PROXY \
+             TG_WEBHOOK_ENABLED TG_WEBHOOK_URL TG_WEBHOOK_SECRET; do
+    seed_from_env "$__k"
+  done
+  [ -n "${DOMAIN:-}" ] || DOMAIN="$(env_value DOMAIN)"
+  [ -n "${LEMC_EMAIL:-}" ] || LEMC_EMAIL="$(env_value LEMC_EMAIL)"
+
   printf '\n%s\n' "${c_blu}=== Настройка бота ===${c_reset}"
   ask_required BOT_TOKEN "Токен бота от @BotFather"
   ask_required ADMIN_IDS "Ваш Telegram ID (из @userinfobot), можно несколько через запятую"
@@ -277,9 +321,6 @@ collect_config() {
     WEBHOOK_PUBLIC_URL="https://${DOMAIN}${WEBHOOK_PATH}"
     TG_WEBHOOK_URL="https://${DOMAIN}${TG_WEBHOOK_PATH}"
     ask_required LEMC_EMAIL "E-mail для Let's Encrypt (уведомления о сертификате)"
-    # HTTPS уже есть — апдейты Telegram логичнее получать вебхуком (быстрее, без
-    # лишних запросов getUpdates). Регистрировать адрес вручную не нужно: бот
-    # сам вызывает setWebhook при старте.
     ask_choice TG_WEBHOOK_ENABLED "Перевести апдейты Telegram на вебхук" "${TG_WEBHOOK_ENABLED:-true}" true false
     if [ "${TG_WEBHOOK_ENABLED:-false}" = "true" ] && [ -z "${TG_WEBHOOK_SECRET:-}" ]; then
       TG_WEBHOOK_SECRET="$(gen_secret)"
@@ -297,7 +338,6 @@ collect_config() {
       if [ -n "${YOOKASSA_SHOP_ID:-}" ]; then
         ask_required YOOKASSA_SECRET_KEY "Секретный ключ ЮKassa"
         if [ "$WITH_NGINX" -eq 1 ]; then
-          # nginx и HTTPS настроит установщик — вебхук включаем сразу.
           WEBHOOK_ENABLED="true"
           WEBHOOK_TRUST_PROXY="true"
           info "Вебхук ЮKassa включён автоматически: ${WEBHOOK_PUBLIC_URL}"
@@ -328,6 +368,10 @@ write_env() {
   put_env "$env_file" PAYMENT_METHODS "${PAYMENT_METHODS:-}"
   set_env "$env_file" VPN_PANEL "$VPN_PANEL"
 
+  # DOMAIN нужен на будущее (--update/--reconfigure) — сохраняем.
+  put_env "$env_file" DOMAIN "${DOMAIN:-}"
+  put_env "$env_file" LEMC_EMAIL "${LEMC_EMAIL:-}"
+
   case "$VPN_PANEL" in
     xui)
       put_env "$env_file" XUI_URL "${XUI_URL:-}"
@@ -353,14 +397,12 @@ write_env() {
     fi
   fi
 
-  # За nginx бот слушает вебхук только на петле — снаружи трафик идёт через прокси.
   if [ "$WITH_NGINX" -eq 1 ]; then
     set_env "$env_file" WEBHOOK_HOST 127.0.0.1
     set_env "$env_file" WEBHOOK_PATH "$WEBHOOK_PATH"
     set_env "$env_file" WEBHOOK_PORT "$WEBHOOK_PORT"
   fi
 
-  # Апдейты Telegram (вебхук) — если решено перевести бота с long-polling.
   if [ "${TG_WEBHOOK_ENABLED:-false}" = "true" ]; then
     set_env "$env_file" TG_WEBHOOK_ENABLED true
     put_env "$env_file" TG_WEBHOOK_URL "${TG_WEBHOOK_URL:-}"
@@ -372,8 +414,6 @@ write_env() {
 install_system_deps() {
   [ "$(id -u)" -eq 0 ] || return 0
   if have apt-get; then
-    # ensurepip отдельно: модуль venv может импортироваться, а пакета python3.x-venv
-    # нет — тогда создание окружения падает на ensurepip.
     if ! have python3 || ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
       info "Устанавливаю системные зависимости (python3, venv, pip)..."
       apt-get update -y
@@ -437,7 +477,6 @@ setup_venv() {
 
 # --- версия сборки ----------------------------------------------------------
 git_describe() {
-  # git_describe КАТАЛОГ — тег/коммиты/хеш (+-dirty), пусто если нет .git/git.
   local dir="$1"
   have git || return 0
   [ -d "$dir/.git" ] || return 0
@@ -445,8 +484,6 @@ git_describe() {
 }
 
 pin_version() {
-  # Прописывает APP_VERSION в .env — чтобы «О боте» и /healthz показывали
-  # конкретную сборку (в каталоге установки .git обычно нет).
   local ver=""
   ver="$(git_describe "$SCRIPT_DIR")"
   [ -n "$ver" ] || ver="$(git_describe "$INSTALL_DIR")"
@@ -455,9 +492,8 @@ pin_version() {
   info "Версия сборки: ${ver}"
 }
 
-# --- nginx / firewall / проверка --------------------------------------------
+# --- nginx / firewall -------------------------------------------------------
 apt_locked() {
-  # Занят ли dpkg/apt (например, идёт unattended-upgrades).
   have pgrep || return 1
   pgrep -x dpkg >/dev/null 2>&1 \
     || pgrep -x apt-get >/dev/null 2>&1 \
@@ -466,7 +502,6 @@ apt_locked() {
 }
 
 wait_apt_lock() {
-  # apt/dpkg держат лок: ждём освобождения (до 3 минут) вместо падения.
   local waited=0
   while apt_locked; do
     if [ "$waited" -eq 0 ]; then
@@ -483,7 +518,6 @@ wait_apt_lock() {
 }
 
 apt_install() {
-  # apt_install pkg... — ставит пакеты из репозиториев дистрибутива.
   [ "$#" -gt 0 ] || return 0
   have apt-get || die "Автонастройка поддерживается только на Debian/Ubuntu (нет apt-get)."
   local attempt
@@ -501,7 +535,6 @@ apt_install() {
 }
 
 port_of_url() {
-  # port_of_url URL — порт из URL (пусто, если явно не указан).
   local url="$1" rest
   [ -n "$url" ] || return 0
   rest="${url#*://}"
@@ -519,7 +552,6 @@ port_of_url() {
 nginx_site_path() { printf '%s' "/etc/nginx/sites-available/${APP_NAME}"; }
 
 render_nginx_config() {
-  # render_nginx_config ШАБЛОН ФАЙЛ — подставляет значения в шаблон.
   local tmpl="$1" out="$2"
   [ -f "$tmpl" ] || die "Не найден шаблон nginx: $tmpl"
   sed -e "s|@@DOMAIN@@|${DOMAIN}|g" \
@@ -532,14 +564,24 @@ render_nginx_config() {
       "$tmpl" > "$out"
 }
 
+# Подтянуть DOMAIN/LEMC_EMAIL/WEBHOOK_PATH из .env — чтобы --update не зависел
+# от флагов и не парсил nginx-конфиг.
+seed_infra_from_env() {
+  local v
+  v="$(env_value DOMAIN)";       [ -n "$v" ] && DOMAIN="$v"
+  v="$(env_value LEMC_EMAIL)";   [ -n "$v" ] && LEMC_EMAIL="$v"
+  v="$(env_value WEBHOOK_PATH)"; [ -n "$v" ] && WEBHOOK_PATH="$v"
+  v="$(env_value WEBHOOK_PORT)"; [ -n "$v" ] && WEBHOOK_PORT="$v"
+  v="$(env_value TG_WEBHOOK_PATH)"; [ -n "$v" ] && TG_WEBHOOK_PATH="$v"
+}
+
 setup_nginx() {
   local site cert_dir tmpl
   site="$(nginx_site_path)"
 
-  # При --update домен не спрашивают — берём его из уже настроенного сайта.
-  if [ -z "${DOMAIN:-}" ] && [ -f "$site" ]; then
-    DOMAIN="$(awk '/server_name/{print $2; exit}' "$site" | tr -d ';')"
-  fi
+  seed_infra_from_env
+
+  # Совсем не настраивать nginx, если он не просили и сайта нет.
   if [ "$WITH_NGINX" -eq 0 ] && [ ! -f "$site" ]; then
     return 0
   fi
@@ -552,8 +594,6 @@ setup_nginx() {
   fi
 
   info "Проверяю nginx и certbot..."
-  # Ставим только отсутствующее: на повторных запусках apt вообще не трогаем
-  # (значит и не ждём dpkg-лок, который держит unattended-upgrades).
   if ! have nginx || ! have certbot || ! have curl; then
     apt_install nginx certbot python3-certbot-nginx curl
   fi
@@ -561,7 +601,6 @@ setup_nginx() {
   tmpl="$INSTALL_DIR/deploy/nginx/opvpnbot.conf.tmpl"
   [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/deploy/nginx/opvpnbot.conf.tmpl"
 
-  # Не перезаписываем чужой конфиг молча — сохраняем копию.
   if [ -f "$site" ] && ! grep -q 'OPVPN (install.sh)' "$site"; then
     local bak="${site}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -a "$site" "$bak"
@@ -570,7 +609,6 @@ setup_nginx() {
 
   if [ ! -d "$cert_dir" ]; then
     info "Выпускаю сертификат Let's Encrypt для ${DOMAIN} (нужны DNS на этот сервер и открытый порт 80)..."
-    # Временный HTTP-блок: ACME-проверка проходит до появления сертификата.
     cat > "$site" <<EOF
 # OPVPN (install.sh) — временный блок для выпуска сертификата
 server {
@@ -594,7 +632,7 @@ EOF
   if [ -d "$cert_dir" ]; then
     render_nginx_config "$tmpl" "$site"
     ln -sf "$site" "/etc/nginx/sites-enabled/${APP_NAME}"
-    nginx -t || die "nginx не принял конфиг ${site} — исправьте и повторите (файл можно заменить своим)."
+    nginx -t || die "nginx не принял конфиг ${site} — исправьте и повторите."
     systemctl reload nginx
     ok "nginx настроен: https://${DOMAIN} (вебхук ${WEBHOOK_PATH}, /healthz)"
   else
@@ -622,8 +660,6 @@ setup_firewall() {
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
 
-  # Панель 3x-ui и подписочный сервер обычно на своих портах (например, 42932 и
-  # 2096): без них ломаются выдача конфигов и доступ в панель — открываем их.
   for url in "$(env_value XUI_URL)" "$(env_value XUI_SUB_BASE)"; do
     p="$(port_of_url "$url")"
     [ -n "$p" ] || continue
@@ -632,7 +668,6 @@ setup_firewall() {
     ok "ufw: открыт порт ${p} (панель/подписка 3x-ui)."
   done
 
-  # Явные доп. порты (например, порт VPN-inbound): --allow-port
   for extra in ${EXTRA_PORTS//,/ }; do
     [ -n "$extra" ] || continue
     ufw allow "${extra}/tcp" >/dev/null
@@ -654,7 +689,6 @@ verify_deploy() {
   fi
   have curl || return 0
   info "Проверяю ${url} ..."
-  # Бот стартует ~5-10 с: ретраим не только на 5xx, но и на "connection refused".
   if curl -fsS --max-time 10 --retry 10 --retry-delay 2 --retry-connrefused "$url"; then
     printf '\n'
     ok "Бот отвечает на /healthz."
@@ -677,8 +711,6 @@ write_service() {
 Description=OPVPN (Telegram bot for VPN subscriptions)
 After=network-online.target
 Wants=network-online.target
-# Щит от crash-loop: не больше 12 запусков за 10 минут. Провал при старте из-за
-# сети успевает восстановиться сам, а вечный цикл падений не заспамливает лог.
 StartLimitIntervalSec=600
 StartLimitBurst=12
 
@@ -692,8 +724,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/python $INSTALL_DIR/bot.py
 Restart=always
 RestartSec=5
-# Код 2 — ошибка конфигурации (bot.py: validate() → SystemExit(2)). Перезапуск
-# тут бессмыслен: .env сам не починится, а рестарты каждые 5 с топят лог.
 RestartPreventExitStatus=2
 TimeoutStopSec=20
 StandardOutput=journal
@@ -750,12 +780,26 @@ main() {
 
   setup_venv
 
-  if [ -f "$INSTALL_DIR/.env" ]; then
-    info "Файл .env уже существует — оставляю без изменений (правьте его вручную при необходимости)."
-  else
+  # Логика .env:
+  #   - --update       → .env не трогаем вообще
+  #   - --reconfigure  → пересобираем (интерактивно или из env)
+  #   - .env нет       → собираем
+  #   - .env есть      → оставляем
+  local need_env=0
+  if [ "$MODE" = "install" ]; then
+    if [ "$RECONFIGURE" -eq 1 ] || [ ! -f "$INSTALL_DIR/.env" ]; then
+      need_env=1
+    fi
+  fi
+
+  if [ "$need_env" -eq 1 ]; then
     collect_config
     write_env
+  elif [ -f "$INSTALL_DIR/.env" ]; then
+    info "Файл .env уже существует — оставляю без изменений (пересобрать: --reconfigure)."
   fi
+
+  [ -f "$INSTALL_DIR/.env" ] || die "Не удалось создать ${INSTALL_DIR}/.env."
 
   pin_version
 
@@ -803,12 +847,11 @@ ${public}
     journalctl -u ${APP_NAME} -f      # живые логи
     systemctl restart ${APP_NAME}
 
-  Обновление:  sudo bash ${INSTALL_DIR}/install.sh --update
+  Обновление:     sudo bash ${INSTALL_DIR}/install.sh --update
+  Пересобрать .env: sudo bash ${INSTALL_DIR}/install.sh --reconfigure
 EOF
 }
 
-# Запускаем поток только при прямом исполнении (позволяет `source install.sh`
-# для тестов/переиспользования функций без запуска установки).
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   main
 fi
