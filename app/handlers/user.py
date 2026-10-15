@@ -803,7 +803,7 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
         try:
             payment = await yk.create_payment(
                 amount_rub=amount,
-                description=f"VPN {order['plan_code']} (заказ #{order_id})",
+                description=f"Price {order['plan_code']} (заказ #{order_id})",
                 metadata={"order_id": order_id, "user_id": call.from_user.id},
                 # Ключ уникален на каждую попытку создания счёта: после
                 # отмены/истечения счёта ЮKassa отвергает повторное использование
