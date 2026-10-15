@@ -671,6 +671,10 @@ class Database:
             "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (user_id,)
         )
 
+    async def delete_subscription(self, sub_id: int) -> None:
+        """Полностью удаляет строку подписки из БД (история в orders/users остаётся)."""
+        await self.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
+
     async def subscription_by_panel_username(self, panel: str, panel_username: str) -> Optional[aiosqlite.Row]:
         """Подписка, привязанная к клиенту панели (для защиты от повторной привязки)."""
         return await self.fetchone(

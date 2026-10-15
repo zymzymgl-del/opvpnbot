@@ -98,15 +98,18 @@ def profile_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_username: str = "") -> InlineKeyboardMarkup:
+def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_username: str = "",
+                    status: str = "active") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if sub_url:
-        builder.button(text="📄 Ссылка подписки", url=sub_url)
-        builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
-    else:
-        builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
-    builder.button(text="📷 QR-код", callback_data=f"sub:qr:{sub_id}")
-    builder.button(text="📲 Как подключиться", callback_data=f"sub:howto:{sub_id}")
+    # Для удалённых/отключённых подписок конфиг не выдаём: только статус и продление.
+    if status not in ("disabled", "deleted"):
+        if sub_url:
+            builder.button(text="📄 Ссылка подписки", url=sub_url)
+            builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
+        else:
+            builder.button(text="🔗 Скопировать ссылку", callback_data=f"sub:copy:{sub_id}")
+        builder.button(text="📷 QR-код", callback_data=f"sub:qr:{sub_id}")
+        builder.button(text="📲 Как подключиться", callback_data=f"sub:howto:{sub_id}")
     builder.button(text="🔄 Продлить", callback_data=f"sub:renew:{sub_id}")
     if support_username:
         builder.button(text="🆘 Не работает", url=f"https://t.me/{support_username}")
@@ -118,6 +121,10 @@ def subscription_kb(sub_id: int, sub_url: str | None, vpn_key: str, support_user
 def keys_kb(subs: Sequence) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for sub in subs:
+        # Удалённые админом (disabled) подписки клиенту не показываем:
+        # кнопка «🔴 … до <дата>» с остатком срока вводит в заблуждение.
+        if sub["status"] == "disabled":
+            continue
         state = "🟢" if sub["status"] == "active" else "🔴"
         builder.button(text=f"{state} {sub['plan_code']} · до {sub['expires_at'][:10]}",
                        callback_data=f"sub:view:{sub['id']}")

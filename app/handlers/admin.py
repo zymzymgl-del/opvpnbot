@@ -598,6 +598,7 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
     if user is None:
         await call.answer("Пользователь не найден.", show_alert=True)
         return
+    data = await state.get_data()
 
     if action == "ban":
         await db.set_user_field(user_id, "is_banned", 1)
@@ -648,22 +649,75 @@ async def cb_user_action(call: CallbackQuery, state: FSMContext, db: Database, c
         await call.answer()
         return
     if action == "wipe":
-        # На каждую активную подписку — запрос в панель: отвечаем сразу.
-        await safe_answer(call)
-        await _working(call, "⏳ Отключаю подписки…",
-                       back_kb(f"adm:user:card:{user_id}", "◀️ К пользователю"))
-        panel = get_panel(cfg, db)
-        removed = 0
-        for sub in await db.user_subscriptions(user_id):
-            if sub["status"] == "active":
+        # Полное удаление подписок: клиент панели + строка в БД. Два шага:
+        # первый клик показывает предупреждение, «✅ Да» — удаляет.
+        # Удаляются ВСЕ подписки, включая истёкшие: после вайпа у клиента
+        # не должно оставаться ни кнопок, ни «остатка срока». Новая подписка
+        # при покупке/выдаче создаётся заново (инвариант «одна активная»
+        # это позволяет), отметка об использованном триале и история заказов
+        # живут в таблице users/orders и от вайпа не зависят.
+        subs = await db.user_subscriptions(user_id)
+        if not subs:
+            await call.answer("У пользователя нет подписок для удаления.", show_alert=True)
+            return
+        if data.get("wipe_confirm") == user_id:
+            await state.update_data(wipe_confirm=None)
+            # На каждую подписку — запрос в панель: отвечаем сразу.
+            await safe_answer(call)
+            await _working(call, "⏳ Удаляю подписки…",
+                           back_kb(f"adm:user:card:{user_id}", "◀️ К пользователю"))
+            panel = get_panel(cfg, db)
+            removed = 0
+            failed: list[str] = []
+            for sub in await db.user_subscriptions(user_id):
                 try:
                     await panel.delete_client(panel_username=sub["panel_username"] or "")
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("Не удалось удалить клиента %s: %s", sub["panel_username"], exc)
-            await db.update_subscription(int(sub["id"]), status="disabled")
-            removed += 1
-        log.info("Админ %s отключил %s подписок пользователя %s", call.from_user.id, removed, user_id)
-        await _show_user_card(call, db, cfg, user_id)
+                    failed.append(str(sub["panel_username"] or sub["id"]))
+                    log.warning("Не удалось удалить клиента %s из панели: %s",
+                                sub["panel_username"], exc)
+                # Строку удаляем в любом случае: подписка больше не должна
+                # светиться у клиента (ни красной кнопкой, ни остатком срока).
+                await db.delete_subscription(int(sub["id"]))
+                removed += 1
+            log.info("Админ %s удалил %s подписок пользователя %s", call.from_user.id, removed, user_id)
+            if failed:
+                await call.message.answer(
+                    f"⚠️ Подписки удалены из бота, но клиентов панели не удалось "
+                    f"удалить: <code>{esc(', '.join(failed))}</code> — проверьте панель."
+                )
+            await _show_user_card(call, db, cfg, user_id)
+            return
+        await state.update_data(wipe_confirm=user_id)
+        text = (
+            f"🗑 <b>Удалить все подписки пользователя <code>{user_id}</code>?</b>\n\n"
+            f"Будет удалено подписок: <b>{len(subs)}</b> "
+            "(все: активные, отключённые и истёкшие).\n\n"
+            "Действие необратимо:\n"
+            "• клиенты панели удаляются (ссылки и QR перестают работать);\n"
+            "• записи подписок удаляются из БД целиком — у пользователя не "
+            "останется ни кнопки, ни «остатка срока»;\n"
+            "• история заказов и отметка об использованном триале сохраняются.\n\n"
+            "После удаления пользователь может купить новую подписку, или вы "
+            "можете выдать ему новую кнопкой «🎁 Выдать подписку»."
+        )
+        try:
+            await call.message.edit_text(
+                text,
+                reply_markup=confirm_kb(f"adm:user:wipe:{user_id}",
+                                         f"adm:user:card:{user_id}",
+                                         yes_label="✅ Да, удалить всё",
+                                         no_label="✖️ Отмена"),
+            )
+        except Exception:
+            await call.message.answer(
+                text,
+                reply_markup=confirm_kb(f"adm:user:wipe:{user_id}",
+                                        f"adm:user:card:{user_id}",
+                                        yes_label="✅ Да, удалить всё",
+                                        no_label="✖️ Отмена"),
+            )
+        await call.answer()
         return
     await call.answer()
 
