@@ -887,9 +887,6 @@ async def _render_sub_card(call: CallbackQuery, db: Database, cfg: Config, sub_i
         await call.answer("Подписка не найдена.", show_alert=True)
         return False
     link = pick_link(sub)
-    if not link:
-        await call.answer("Ссылка ещё не готова.", show_alert=True)
-        return
     
     text = (
         f"🔑 <b>Подписка #{sub_id}</b>\n\n"
