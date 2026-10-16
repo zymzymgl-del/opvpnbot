@@ -78,6 +78,7 @@ from app.services.subs import (  # noqa: E402
     send_reminders,
     send_subscription_card,
 )
+from app.utils import human_left  # noqa: E402
 
 PASSED: list[str] = []
 FAILED: list[str] = []
@@ -208,6 +209,22 @@ async def run() -> None:
     check("кнопки обслуживания: перезапуск бота и Xray",
           {"🔄 Перезапустить бота", "♻️ Перезапустить Xray"} <= labels, str(labels))
     check("XuiPanel умеет перезапускать Xray", callable(getattr(XuiPanel, "restart_xray", None)))
+
+    print("\n1d2. human_left: корректный разбор остатка (дни/часы/минуты)")
+    check("23 ч 59 мин → «23 ч. 59 мин.»",
+          human_left(utcnow() + timedelta(hours=23, minutes=59)) == "23 ч. 59 мин.",
+          human_left(utcnow() + timedelta(hours=23, minutes=59)))
+    check("23 ч ровно → «23 ч. 0 мин.»",
+          human_left(utcnow() + timedelta(hours=23)) == "23 ч. 0 мин.",
+          human_left(utcnow() + timedelta(hours=23)))
+    check("1 д 23 ч 59 мин → «1 д. 23 ч.»",
+          human_left(utcnow() + timedelta(days=1, hours=23, minutes=59)) == "1 д. 23 ч.",
+          human_left(utcnow() + timedelta(days=1, hours=23, minutes=59)))
+    check("59 мин → «59 мин.»",
+          human_left(utcnow() + timedelta(minutes=59)) == "59 мин.",
+          human_left(utcnow() + timedelta(minutes=59)))
+    check("прошедшее время → «истёк»",
+          human_left(utcnow() - timedelta(minutes=5)) == "истёк")
 
     print("\n1e. XUI_SUB_BASE: только полный URL (путь без хоста Telegram отклоняет)")
     check("полный URL подписки принят", is_absolute_url("https://sub.example.com:2096/abc/def"))

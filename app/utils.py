@@ -58,10 +58,14 @@ def human_left(value: str | datetime | None) -> str:
     if total_seconds <= 0:
         return "истёк"
     days, rem = divmod(total_seconds, 86400)
-    hours, _ = divmod(rem, 3600)
+    hours, rem = divmod(rem, 3600)
+    minutes = -(-rem // 60)  # округление вверх: «23 ч. 59 мин.» вместо «23 ч. 58 мин.»
+    if minutes == 60:
+        hours, minutes = hours + 1, 0
+    if hours == 24:
+        days, hours = days + 1, 0
     if days:
         return f"{days} д. {hours} ч."
-    minutes = rem // 60
     if hours:
         return f"{hours} ч. {minutes} мин."
     return f"{minutes} мин."
