@@ -53,12 +53,11 @@ def back_kb(callback: str = "menu:main", label: str = "◀️ В меню") -> I
 def plans_kb(plans: Sequence, currency: str = "₽", prefix: str = "buy") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for plan in plans:
-        details = f"{plan['days']} дн · {human_gb(plan['traffic_gb'])} · {plan['devices']} устр."
+        details = f"{plan['days']} дн · {human_gb(plan['traffic_gb'])}"
         builder.button(
-            text=f"{plan['title']} — {price(plan['price'], currency)} ({details})",
+            text=f"{plan['title']} — {plan['devices']} устр. — {price(plan['price'], currency)} ({details})",
             callback_data=f"{prefix}:{plan['code']}",
         )
-    builder.button(text="🎟 Ввести промокод", callback_data="promo:enter")
     builder.button(text="◀️ В меню", callback_data="menu:main")
     builder.adjust(1)
     return builder.as_markup()
@@ -68,9 +67,9 @@ def switch_plans_kb(plans: Sequence, currency: str = "₽", order_id: int | None
     """Список тарифов в режиме смены тарифа внутри уже открытого заказа."""
     builder = InlineKeyboardBuilder()
     for plan in plans:
-        details = f"{plan['days']} дн · {human_gb(plan['traffic_gb'])} · {plan['devices']} устр."
+        details = f"{plan['days']} дн · {human_gb(plan['traffic_gb'])}"
         builder.button(
-            text=f"{plan['title']} — {price(plan['price'], currency)} ({details})",
+            text=f"{plan['title']} — {plan['devices']} устр. — {price(plan['price'], currency)} ({details})",
             callback_data=f"switch:{plan['code']}",
         )
     if order_id is not None:
