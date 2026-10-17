@@ -180,6 +180,15 @@ class Config:
     health_enabled: bool
     health_host: str
     health_port: int
+    #: Включать панель и heartbeat в HTTP-статус (false — только диагностика в JSON).
+    health_deep: bool
+    health_panel_check: bool
+    #: Сколько секунд кэшировать результат проверки панели (0 — проверять каждый раз).
+    health_panel_ttl: int
+    health_panel_timeout: float
+    #: Пороги heartbeat: 0 — проверка выключена.
+    health_max_worker_age: int
+    health_max_update_age: int
 
     # --- Прочее ---
     db_path: str
@@ -272,6 +281,12 @@ def load_config() -> Config:
         health_enabled=_bool("HEALTH_ENABLED", True),
         health_host=_str("HEALTH_HOST", "127.0.0.1"),
         health_port=_int("HEALTH_PORT", 8081),
+        health_deep=_bool("HEALTH_DEEP", False),
+        health_panel_check=_bool("HEALTH_PANEL_CHECK", True),
+        health_panel_ttl=max(0, _int("HEALTH_PANEL_TTL", 60)),
+        health_panel_timeout=_float("HEALTH_PANEL_TIMEOUT", 5.0),
+        health_max_worker_age=max(0, _int("HEALTH_MAX_WORKER_AGE", 600)),
+        health_max_update_age=max(0, _int("HEALTH_MAX_UPDATE_AGE", 0)),
         db_path=_str("DB_PATH", str(BASE_DIR / "data" / "opvpnbot.sqlite3")),
         log_level=_str("LOG_LEVEL", "INFO").upper(),
         log_file=_str("LOG_FILE", str(BASE_DIR / "data" / "bot.log")),
@@ -332,6 +347,8 @@ def validate(cfg: Config) -> list[str]:
         )
     if cfg.health_enabled and cfg.health_port <= 0:
         problems.append("HEALTH_PORT должен быть больше нуля (либо выключите HEALTH_ENABLED).")
+    if cfg.health_enabled and cfg.health_panel_timeout <= 0:
+        problems.append("HEALTH_PANEL_TIMEOUT должен быть больше нуля (например, 5).")
     if cfg.health_enabled and cfg.any_webhook_enabled and cfg.health_port == cfg.webhook_port:
         problems.append(
             "HEALTH_PORT и WEBHOOK_PORT совпадают — healthcheck и вебхуки не смогут слушать "

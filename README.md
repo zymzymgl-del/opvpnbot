@@ -244,6 +244,8 @@ TG_WEBHOOK_SECRET=
 | `TG_WEBHOOK_ENABLED`, `TG_WEBHOOK_URL`, `TG_WEBHOOK_SECRET` | Апдейты Telegram вебхуком вместо long-polling (пустой `SECRET` и неверный URL — ошибка на старте) |
 | `TG_WEBHOOK_FAST_ACK`                              | `true` — отвечать Telegram 200 сразу, обработку вести в фоне (нужно при долгой выдаче в панели) |
 | `HEALTH_ENABLED`, `HEALTH_HOST`, `HEALTH_PORT`     | HTTP-эндпоинт `GET /healthz` для внешнего мониторинга (uptime)                               |
+| `HEALTH_DEEP`, `HEALTH_PANEL_CHECK`, `HEALTH_PANEL_TTL`, `HEALTH_PANEL_TIMEOUT` | Глубокий healthcheck: проверка панели (с кэшем) влияет на HTTP-статус |
+| `HEALTH_MAX_WORKER_AGE`, `HEALTH_MAX_UPDATE_AGE`   | Порог «зависания» воркера/апдейтов в секундах (`0` — не проверять)                           |
 | `APP_VERSION`                                      | Версия сборки для `/healthz` (пусто — вычислим из git; `install.sh`/Docker проставляют сами) |
 | `NOTIFY_DAYS_BEFORE`                               | За сколько дней напоминать: по умолчанию `3,1`                                               |
 | `AUTO_DISABLE_EXPIRED`                             | Отключать клиента в панели при истечении подписки                                            |
@@ -269,6 +271,7 @@ TG_WEBHOOK_SECRET=
 
 - [ ] `curl -fsS http://127.0.0.1:8081/healthz` → `{"ok": true}`
 - [ ] адрес `/healthz` добавлен во внешний монитор (healthchecks.io / UptimeRobot) — алерт, если бот упал
+- [ ] `HEALTH_DEEP=true` — чтобы монитор ловил и недоступность панели, и зависший воркер (иначе в JSON это только диагностика)
 - [ ] в логе при старте: `Панель 'xui': OK` и `3x-ui TLS: проверка включена`
 - [ ] тестовая покупка от начала до конца: заказ → оплата → ключ пришёл (можно на тестовом магазине ЮKassa)
 - [ ] резервная копия: `/admin` → 💾 Бэкап базы
@@ -290,11 +293,20 @@ TG_WEBHOOK_SECRET=
 
 ### Healthcheck
 
-Бот поднимает `GET /healthz` (по умолчанию `127.0.0.1:8081`), который проверяет доступность БД и отдаёт `200 {"ok": true}` либо `503`. Это то, за чем следит внешний монитор.
+Бот поднимает `GET /healthz` (по умолчанию `127.0.0.1:8081`). Старые поля сохранены: `ok`, `db`, `version`, `build`; при проблемах HTTP-статус `503`.
+
+Дополнительно в ответе есть диагностика:
+
+- `panel` — `ok` / `error` / `disabled`, `panel_message`, `panel_checked_ago` (результат кэшируется на `HEALTH_PANEL_TTL` секунд, чтобы монитор не дёргал панель каждый раз);
+- `heartbeat` — `update_age` (секунд с последнего обработанного апдейта Telegram) и `worker_age` (секунд с последнего тика фонового воркера);
+- `reasons` — почему статус `503` (`db`, `panel`, `worker`, `updates`).
 
 ```bash
 curl -fsS http://127.0.0.1:8081/healthz && echo OK
+# {"ok":true,"db":"ok","panel":"ok",...,"heartbeat":{"update_age":3.2,"worker_age":12.5},...}
 ```
+
+**Обратная совместимость:** по умолчанию (`HEALTH_DEEP=false`) на HTTP-статус влияет только БД, как раньше; панель и heartbeat видны в JSON. Чтобы панель/зависший воркер тоже давали `503` (и монитор присылал алерт), включите `HEALTH_DEEP=true`. Проверка «нет апдейтов» (`HEALTH_MAX_UPDATE_AGE`) по умолчанию выключена, т.к. зависит от трафика.
 
 Для systemd — проксируйте адрес через nginx (см. «🌐 nginx: вебхуки (ЮKassa и Telegram) и мониторинг»); для Docker задайте `HEALTH_HOST=0.0.0.0` и пробросьте порт.
 

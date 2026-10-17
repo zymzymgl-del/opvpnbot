@@ -22,7 +22,8 @@ app/services/panels.py     — выдача ключей: BasePanel → XuiPanel
 app/services/payments.py   — YooKassaClient (REST v3: создание платежа, проверка статуса)
 app/services/subs.py       — бизнес-логика: grant/complete/expired/reminders + background_worker
 app/webhook.py             — aiohttp-сервер вебхуков: уведомления ЮKassa + апдейты Telegram (опционально)
-app/health.py              — aiohttp-сервер GET /healthz для внешнего мониторинга (uptime)
+app/health.py              — aiohttp-сервер GET /healthz для внешнего мониторинга (uptime):
+                             БД + кэшированная проверка панели + heartbeat воркера/апдейтов
 app/logctx.py              — request_id (contextvars) для корреляции логов одного апдейта
 tools/selftest.py          — проверки логики без сети (100+, идемпотентность, вебхук, бэкапы, claim)
 tools/integration_test.py  — маршрутизация апдейтов через Dispatcher.feed_update

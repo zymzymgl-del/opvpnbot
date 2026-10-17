@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import Config, is_absolute_url
 from app.db import Database, from_iso, to_iso, utcnow
+from app.health import touch_worker
 from app.keyboards import subscription_kb
 from app.logctx import set_request_id
 from app import ui
@@ -656,6 +657,8 @@ async def background_worker(bot: Bot, cfg: Config, db: Database, yk=None) -> Non
     """Единый цикл фоновых задач: напоминания, истечение, проверка платежей."""
     set_request_id("worker")  # rid для всех логов воркера (отдельная задача — свой контекст)
     while True:
+        # Heartbeat для /healthz: воркер не завис и цикл доходит до новой итерации.
+        touch_worker()
         try:
             await process_expired(bot, cfg, db)
             await send_reminders(bot, cfg, db)

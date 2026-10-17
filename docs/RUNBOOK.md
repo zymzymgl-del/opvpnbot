@@ -6,13 +6,34 @@
 ## 0. Быстрая диагностика (30 секунд)
 
 ```bash
-curl -fsS http://127.0.0.1:8081/healthz     # {"ok":true,"db":"ok","version":"2.0.0","build":"2.0.0-8-g1a2b3c4"}
+curl -fsS http://127.0.0.1:8081/healthz     # {"ok":true,"db":"ok","panel":"ok",...,"heartbeat":{...}}
 systemctl status opvpnbot                    # запущен/рестартует?
 journalctl -u opvpnbot -n 200                # последние строки логов
 ```
 
 - Поле `build` в `/healthz` — какая именно сборка запущена (тег/коммит); помогает сразу
   понять, что деплой не применился. Там же `version` (semver).
+
+- Расширенная диагностика в том же ответе:
+
+  | Поле | Что значит |
+  |---|---|
+  | `db` | `ok` / `error` — доступность SQLite (ошибка всегда даёт 503) |
+  | `panel` | `ok` / `error` / `disabled` — проверка панели 3x-ui (кэш `HEALTH_PANEL_TTL`, по умолчанию 60 с) |
+  | `panel_message` | текст ошибки/список inbound'ов |
+  | `heartbeat.worker_age` | секунд с последнего тика фонового воркера (норма ≤ 180–200 с) |
+  | `heartbeat.update_age` | секунд с последнего обработанного апдейта Telegram |
+  | `reasons` | при 503 — список причин: `db`, `panel`, `worker`, `updates` |
+
+- По умолчанию (`HEALTH_DEEP=false`) HTTP-статус зависит только от БД (прежнее
+  поведение), а панель и heartbeat — только диагностика. С `HEALTH_DEEP=true`
+  проблемы панели/воркера тоже дают 503 — так внешний монитор пришлёт алерт.
+  `worker` при `worker_age > HEALTH_MAX_WORKER_AGE` (600 с): воркер завис или
+  застрял на долгой операции. `updates` — только если задан
+  `HEALTH_MAX_UPDATE_AGE` (по умолчанию 0 = выключено).
+  Если `reasons` содержит `panel` — см. раздел 2; `worker` — проверьте лог по
+  `rid` и `journalctl`, затем `systemctl restart opvpnbot`.
+
 
 - Полный лог — `data/bot.log` (с ротацией). Каждая строка содержит `rid=…` —
   короткий id конкретного действия. Найти всё по одному инциденту:

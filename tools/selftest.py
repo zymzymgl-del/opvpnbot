@@ -741,6 +741,56 @@ async def run() -> None:
     check("ротация держит не больше backup_keep копий", len(remaining) <= 2, str([p.name for p in remaining]))
     check("копия читается как SQLite и содержит таблицы", _sqlite_backup_ok(remaining[-1] if remaining else Path(p1)))
 
+    # 13b-2. Бэкап из админки: консистентный снимок, а не «живой» файл в WAL
+    from app.handlers import admin as admin_mod
+
+    class BackupCall:
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+            self.docs: list[tuple[str, bool, str | None]] = []
+            self.sent_path: Path | None = None
+            outer = self
+
+            class _Msg:
+                async def answer(self, text, **kw):
+                    outer.answers.append(text)
+
+                async def answer_document(self, document, caption=None, **kw):
+                    # Читаем снимок ДО удаления временного файла в finally.
+                    path = Path(document.path)
+                    outer.sent_path = path
+                    con = sqlite3.connect(str(path))
+                    try:
+                        row = con.execute(
+                            "SELECT value FROM settings WHERE key = 'backup_marker'"
+                        ).fetchone()
+                    finally:
+                        con.close()
+                    outer.docs.append((path.name, _sqlite_backup_ok(path), row[0] if row else None))
+                    return SimpleNamespace(message_id=1)
+
+            self.message = _Msg()
+
+        async def answer(self, text="", **kw):
+            self.answers.append(text)
+
+    # Маркер пишем непосредственно перед бэкапом: если бы отправлялся «живой»
+    # файл без WAL, свежая запись могла бы в снимок не попасть.
+    await db.set_setting("backup_marker", "fresh-snapshot")
+    backup_call = BackupCall()
+    await admin_mod.cb_backup(backup_call, db, cfg)
+    check("админ-бэкап: файл отправлен", len(backup_call.docs) == 1, str(backup_call.docs))
+    if backup_call.docs:
+        name, valid, marker = backup_call.docs[0]
+        check("админ-бэкап: валидная SQLite-копия с таблицами", valid, name)
+        check("админ-бэкап: снимок содержит свежую запись", marker == "fresh-snapshot", str(marker))
+        check("админ-бэкап: понятное имя файла",
+              name.startswith("opvpnbot-backup-") and name.endswith(".sqlite3"), name)
+    check("админ-бэкап: временный файл удалён",
+          backup_call.sent_path is not None and not backup_call.sent_path.exists(),
+          str(backup_call.sent_path))
+    await db.execute("DELETE FROM settings WHERE key = 'backup_marker'")
+
     # 13c. Вебхук Telegram: конфиг, путь и secret_token
     from app.config import _validate_tg_webhook
     from app.webhook import _secret_ok
@@ -901,6 +951,99 @@ async def run() -> None:
     await db.update_subscription(999999, **{"status = 'x' WHERE 1=1 --": "y"})
     check("незнакомый ключ update_subscription отброшен (таблица цела)",
           await db.count_users() == users_before)
+
+    # 13e. Расширенный /healthz: heartbeat, кэш панели, deep и совместимость
+    import app.health as health_mod
+
+    check("health: deep по умолчанию выключен (прежнее поведение)",
+          cfg.health_deep is False)
+    check("health: панель проверяется, кэш 60 с, таймаут 5 с",
+          cfg.health_panel_check is True and cfg.health_panel_ttl == 60
+          and cfg.health_panel_timeout == 5.0)
+    check("health: порог воркера 600 с, апдейтов — выключен (0)",
+          cfg.health_max_worker_age == 600 and cfg.health_max_update_age == 0)
+
+    health_mod.reset_state()
+    health_mod.touch_update()
+    health_mod.touch_worker()
+    hb = health_mod.heartbeat()
+    check("health: heartbeat обновляется", hb["update_age"] < 1 and hb["worker_age"] < 1, str(hb))
+
+    # Совместимость: без deep панель/воркер/апдейты не влияют на статус.
+    ok, reasons = health_mod.evaluate(
+        cfg, db_ok=True, panel={"ok": False, "message": "down", "checked_ago": 0.0},
+        hb={"update_age": 10**6, "worker_age": 10**6},
+    )
+    check("health без deep: статус зависит только от БД", ok is True and reasons == [],
+          f"{ok} {reasons}")
+
+    deep = dataclasses.replace(cfg, health_deep=True,
+                               health_max_worker_age=600, health_max_update_age=1800)
+    ok, reasons = health_mod.evaluate(
+        deep, db_ok=True, panel={"ok": False, "message": "down", "checked_ago": 0.0},
+        hb={"update_age": 0.0, "worker_age": 0.0},
+    )
+    check("health deep: панель недоступна → не healthy", ok is False and "panel" in reasons,
+          str(reasons))
+    ok, reasons = health_mod.evaluate(
+        deep, db_ok=True, panel={"ok": True, "message": "", "checked_ago": 0.0},
+        hb={"update_age": 0.0, "worker_age": 601.0},
+    )
+    check("health deep: застрявший воркер → не healthy",
+          ok is False and "worker" in reasons, str(reasons))
+    ok, reasons = health_mod.evaluate(
+        deep, db_ok=True, panel={"ok": True, "message": "", "checked_ago": 0.0},
+        hb={"update_age": 1801.0, "worker_age": 0.0},
+    )
+    check("health deep: нет апдейтов дольше порога → не healthy",
+          ok is False and "updates" in reasons, str(reasons))
+    ok, reasons = health_mod.evaluate(
+        deep, db_ok=False, panel={"ok": True, "message": "", "checked_ago": 0.0},
+        hb={"update_age": 0.0, "worker_age": 0.0},
+    )
+    check("health deep: БД недоступна — причина db", ok is False and reasons == ["db"], str(reasons))
+
+    class _HealthPanel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.ok = True
+            self.delay = 0.0
+
+        async def health(self):
+            self.calls += 1
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            return self.ok, ("ok" if self.ok else "панель недоступна")
+
+    _hp = _HealthPanel()
+    _orig_get_panel = health_mod.get_panel
+    health_mod.get_panel = lambda _cfg, _db: _hp
+    try:
+        health_mod.reset_state()
+        cached_cfg = dataclasses.replace(cfg, health_panel_ttl=60, health_panel_timeout=1.0)
+        r1 = await health_mod._check_panel_cached(cached_cfg, db)
+        r2 = await health_mod._check_panel_cached(cached_cfg, db)
+        check("health: результат панели кэшируется",
+              _hp.calls == 1 and r1["ok"] is True and r2["ok"] is True, f"calls={_hp.calls}")
+        check("health: возраст кэша отдаётся",
+              r2["checked_ago"] is not None and r2["checked_ago"] >= 0, str(r2))
+
+        health_mod.reset_state()
+        _hp.ok = False
+        r3 = await health_mod._check_panel_cached(cached_cfg, db)
+        check("health: недоступная панель отдаётся как ошибка", r3["ok"] is False, str(r3))
+
+        health_mod.reset_state()
+        _hp.ok = True
+        _hp.delay = 0.2
+        slow_cfg = dataclasses.replace(cfg, health_panel_ttl=0, health_panel_timeout=0.01)
+        r4 = await health_mod._check_panel_cached(slow_cfg, db)
+        check("health: таймаут панели не вешает health",
+              r4["ok"] is False and "не ответила" in r4["message"], str(r4))
+    finally:
+        _hp.delay = 0.0
+        health_mod.get_panel = _orig_get_panel
+        health_mod.reset_state()
 
     print("\n14. Привязка существующего клиента панели (QR/claim)")
 

@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from app import ui
 from app.config import Config
 from app.db import Database
+from app.health import touch_update
 from app.keyboards import subscription_check_kb
 from app.logctx import current_request_id, log_context
 from app.services.subs import notify_admins
@@ -144,6 +145,9 @@ class ErrorsMiddleware(BaseMiddleware):
         self.cfg = cfg
 
     async def __call__(self, handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        # Heartbeat для /healthz: любой update (polling или вебхук) — признак, что
+        # транспорт и цикл обработки живы.
+        touch_update()
         with log_context():
             try:
                 return await handler(event, data)

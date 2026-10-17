@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import signal
+import tempfile
 from datetime import timedelta
 
 from aiogram import Bot, F, Router
@@ -259,11 +260,29 @@ async def cb_backup(call: CallbackQuery, db: Database, cfg: Config) -> None:
     # Отвечаем СРАЗУ: загрузка файла БД на серверы Telegram может занять больше
     # 30 с (особенно с WAL-файлами), а поздний ответ Telegram отклоняет.
     await safe_answer(call, "Готовлю файл…")
+    tmp_path: str | None = None
     try:
-        document = FSInputFile(cfg.db_path, filename=f"opvpnbot-backup-{utcnow():%Y%m%d-%H%M}.sqlite3")
+        # НЕ отправляем «живой» файл cfg.db_path: в режиме WAL свежие транзакции
+        # лежат в -wal, поэтому копия одного лишь .sqlite3 может оказаться
+        # устаревшей, а чтение работающего файла — несогласованным. db.backup()
+        # делает консистентный снимок через SQLite Online Backup API под тем же
+        # замком, что и записи.
+        fd, tmp_path = tempfile.mkstemp(prefix="opvpnbot-backup-", suffix=".sqlite3")
+        os.close(fd)
+        await db.backup(tmp_path)
+        document = FSInputFile(
+            tmp_path, filename=f"opvpnbot-backup-{utcnow():%Y%m%d-%H%M}.sqlite3"
+        )
         await call.message.answer_document(document, caption="💾 Резервная копия базы данных")
     except Exception as exc:
         await call.message.answer(f"⚠️ Не удалось отправить файл: {exc}")
+    finally:
+        # Снимок нужен только на время отправки; в /tmp он не должен накапливаться.
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError as exc:
+                log.warning("Не удалось удалить временный бэкап %s: %s", tmp_path, exc)
 
 
 # ---------------------------------------------------------------------------

@@ -556,6 +556,87 @@ async def run() -> None:
                resp.status == 200 and "Главное меню" in sent("message"),
                f"status={resp.status} {sent('message')[:120]}")
 
+    print("\n7. Расширенный /healthz (панель с кэшем, heartbeat, deep)")
+    import time as _time
+
+    from app import health as health_mod
+    from app.health import build_health_app
+
+    class _HealthPanel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.ok = True
+
+        async def health(self):
+            self.calls += 1
+            return self.ok, ("ok" if self.ok else "панель недоступна")
+
+    hp = _HealthPanel()
+    orig_get_panel = health_mod.get_panel
+    health_mod.get_panel = lambda _cfg, _db: hp
+    try:
+        health_mod.reset_state()
+        deep_cfg = dc.replace(
+            cfg,
+            health_enabled=True,
+            health_deep=True,
+            health_panel_check=True,
+            health_panel_ttl=300,
+            health_panel_timeout=1.0,
+            health_max_worker_age=600,
+            health_max_update_age=0,
+        )
+        health_app = build_health_app(deep_cfg, db)
+        async with TestClient(TestServer(health_app)) as client:
+            resp = await client.get("/healthz")
+            data = await resp.json()
+            expect("health: живая БД и панель → 200", resp.status == 200, f"{resp.status} {data}")
+            expect("health: старые поля ok/db/version/build сохранены",
+                   {"ok", "db", "version", "build"} <= set(data), str(sorted(data)))
+            expect("health: панель и heartbeat в ответе",
+                   data.get("panel") == "ok" and "heartbeat" in data, str(data))
+
+            calls = hp.calls
+            resp = await client.get("/healthz")
+            data = await resp.json()
+            expect("health: повторный опрос берёт панель из кэша",
+                   hp.calls == calls and data.get("panel_checked_ago") is not None,
+                   f"calls={hp.calls}")
+
+            hp.ok = False
+            health_mod.reset_state()
+            resp = await client.get("/healthz")
+            data = await resp.json()
+            expect("health deep: панель недоступна → 503 и reason=panel",
+                   resp.status == 503 and "panel" in (data.get("reasons") or []),
+                   f"{resp.status} {data}")
+
+            hp.ok = True
+            health_mod.reset_state()
+            health_mod._last_worker_tick = _time.monotonic() - deep_cfg.health_max_worker_age - 5
+            resp = await client.get("/healthz")
+            data = await resp.json()
+            expect("health deep: зависший воркер → 503 и reason=worker",
+                   resp.status == 503 and "worker" in (data.get("reasons") or []),
+                   f"{resp.status} {data}")
+            health_mod.reset_state()
+
+            # Обратная совместимость: без deep проблемы панели не меняют статус.
+            compat_cfg = dc.replace(deep_cfg, health_deep=False)
+            health_mod.get_panel = lambda _cfg, _db: hp
+            hp.ok = False
+            health_mod.reset_state()
+            async with TestClient(TestServer(build_health_app(compat_cfg, db))) as compat:
+                resp = await compat.get("/healthz")
+                data = await resp.json()
+                expect("health без deep: 200, панель только в диагностике (совместимость)",
+                       resp.status == 200 and data.get("panel") == "error"
+                       and data.get("ok") is True,
+                       f"{resp.status} {data}")
+    finally:
+        health_mod.get_panel = orig_get_panel
+        health_mod.reset_state()
+
     await db.close()
     await bot.session.close()
 
