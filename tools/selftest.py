@@ -285,7 +285,7 @@ async def run() -> None:
           "/hvpa9knwot91fkxb" not in rel_card_text and "<a href=" not in rel_card_text,
           rel_card_text)
 
-    # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "2devic"/"3devic"/…
+    # Тест ниже хардкодом использует коды "1m"/"3m", а DEFAULT_PLANS в db.py — "1device"/"2device"/…
     # без этих тарифов сценарий падает на первом же grant_subscription.
     await db.upsert_plan("1m", "1 месяц", 150, 30, 0, 2)
     await db.upsert_plan("3m", "3 месяца", 405, 90, 0, 3)

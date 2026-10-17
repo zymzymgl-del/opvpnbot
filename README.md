@@ -29,8 +29,7 @@ sudo bash install.sh --dir /srv/opvpnbot --no-service   # свой катало�
 ```bash
 systemctl status opvpnbot
 journalctl -u opvpnbot -f     # живые логи
-
-
+systemctl restart opvpnbot
 ```
 
 ## 🐳 Установка через Docker
