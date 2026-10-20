@@ -65,6 +65,7 @@ from app.services.panels import (  # noqa: E402
     _as_dict,
     _build_link,
     _flow_applies_to_all,
+    _has_reality_inbound,
     get_panel,
 )
 from app.services import panels as panels_mod  # noqa: E402
@@ -523,14 +524,67 @@ async def run() -> None:
     check("XUI_INBOUND_IDS разобран в список", multi_cfg.xui_inbound_ids == (1, 3, 7), str(multi_cfg.xui_inbound_ids))
     check("XuiPanel хранит список inbound'ов", XuiPanel(multi_cfg).inbound_ids == (1, 3, 7))
     os.environ.pop("XUI_INBOUND_IDS", None)
-    check("мульти-inbound: flow корректен для vless tcp+tls/reality", _flow_applies_to_all([
+    check("одиночный inbound: flow корректен для vless tcp+tls/reality", _flow_applies_to_all([
         {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}'},
         {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "tls"}'},
     ]))
-    check("мульти-inbound: ws/trojan отключают flow", not _flow_applies_to_all([
+    check("одиночный inbound: ws/trojan отключают flow", not _flow_applies_to_all([
         {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
         {"protocol": "trojan", "streamSettings": '{"network": "tcp", "security": "tls"}'},
     ]))
+    check("_has_reality_inbound находит reality среди inbound'ов", _has_reality_inbound([
+        {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
+        {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}'},
+    ]))
+    check("_has_reality_inbound пустой список -> False", not _has_reality_inbound([]))
+    check("_has_reality_inbound без reality -> False", not _has_reality_inbound([
+        {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
+    ]))
+
+    async def _capture_created_client(inbounds: list[dict], *, ids: tuple[int, ...]):
+        captured: dict[str, object] = {}
+
+        async def fake_api(path: str, method: str = "GET", payload=None):
+            if path == "/clients/add":
+                captured["client"] = payload["client"]
+                return {"success": True}
+            if path.startswith("/clients/get/"):
+                return {"obj": {"client": dict(captured.get("client") or {})}}
+            raise AssertionError(f"unexpected api call {path}")
+
+        cfg_multi = dataclasses.replace(
+            load_config(), xui_inbound_ids=ids, xui_inbound_id=(ids[0] if ids else 0),
+        )
+        panel = XuiPanel(cfg_multi)
+        panel._api = fake_api  # type: ignore[method-assign]
+        await panel._create_client_clients_api(
+            inbounds, user_id=1, days=30, devices=1, traffic_gb=10, plan_code="1m",
+        )
+        return captured["client"]
+
+    created_single = await _capture_created_client([
+        {"id": 1, "protocol": "vless", "settings": '{"clients": []}',
+         "streamSettings": '{"network": "ws", "security": "tls"}'},
+    ], ids=())
+    check("одиночный inbound (ws+tls): flow не ставится", not created_single.get("flow"), str(created_single))
+
+    created_multi = await _capture_created_client([
+        {"id": 1, "protocol": "vless", "settings": '{"clients": []}',
+         "streamSettings": '{"network": "ws", "security": "tls"}'},
+        {"id": 2, "protocol": "vless", "settings": '{"clients": []}',
+         "streamSettings": '{"network": "tcp", "security": "reality"}'},
+    ], ids=(1, 2))
+    check("мульти-inbound (есть reality): flow ставится всегда",
+          created_multi.get("flow") == "xtls-rprx-vision", str(created_multi))
+
+    created_multi_no_reality = await _capture_created_client([
+        {"id": 1, "protocol": "vless", "settings": '{"clients": []}',
+         "streamSettings": '{"network": "ws", "security": "tls"}'},
+        {"id": 2, "protocol": "vless", "settings": '{"clients": []}',
+         "streamSettings": '{"network": "ws", "security": "tls"}'},
+    ], ids=(1, 2))
+    check("мульти-inbound без reality: flow не ставится",
+          not created_multi_no_reality.get("flow"), str(created_multi_no_reality))
     panel = get_panel(cfg, db)
     check("фабрика возвращает панель 3x-ui (заглушка)", panel is fake_panel)
 

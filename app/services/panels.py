@@ -207,6 +207,18 @@ class XuiPanel(BasePanel):
         """Первый из выбранных inbound'ов (для одиночных операций/совместимости)."""
         return (await self._inbounds())[0]
 
+    async def _has_configured_reality(self) -> bool:
+        """Есть ли среди настроенных XUI_INBOUND_IDS inbound с reality.
+
+        Используется для классического API (один inbound на выдачу): в
+        мульти-inbound режиме всегда заведомо присутствует инбаунд с
+        reality+tls, и flow для vless ставится безусловно.
+        """
+        try:
+            return _has_reality_inbound(await self._inbounds())
+        except PanelError:
+            return False
+
     @staticmethod
     def _clients(inbound: dict) -> list[dict]:
         return list(_as_dict(inbound.get("settings")).get("clients") or [])
@@ -278,7 +290,18 @@ class XuiPanel(BasePanel):
         template = settings[0] if settings else {}
         email = f"tg{user_id}_{plan_code}_{int(time.time())}"
         expiry_ms = int(now_plus(days).timestamp() * 1000)
-        flow = template.get("flow", "xtls-rprx-vision" if protocol == "vless" else "")
+        # flow (xtls-rprx-vision): в мульти-inbound режиме (XUI_INBOUND_IDS)
+        # всегда есть как минимум один inbound с reality+tls, поэтому если
+        # среди выбранных инбаундов встречается reality — flow для vless
+        # ставим клиенту безусловно, не требуя применимости ко всем инбаундам.
+        # В шаблоне может лежать пустой flow — тогда берём дефолт для vless.
+        multi_reality = len(inbounds) > 1 and _has_reality_inbound(inbounds)
+        flow_ok = protocol == "vless" and (
+            multi_reality or _flow_applies_to_all(inbounds)
+        )
+        flow = ""
+        if flow_ok:
+            flow = template.get("flow") or "xtls-rprx-vision"
         client: dict[str, Any] = {
             "email": email,
             "enable": True,
@@ -295,7 +318,7 @@ class XuiPanel(BasePanel):
             # инбаундам с этим subId, поэтому разные шифрования попадут в одну подписку.
             "subId": secrets.token_hex(8),
         }
-        if protocol == "vless" and flow and (len(inbounds) == 1 or _flow_applies_to_all(inbounds)):
+        if flow:
             client["flow"] = flow
         await self._api(
             "/clients/add",
@@ -394,9 +417,21 @@ class XuiPanel(BasePanel):
         client_uuid = str(uuid.uuid4())
         sub_id = secrets.token_hex(8)
         expiry_ms = int(now_plus(days).timestamp() * 1000)
+        # flow ставим, когда он применим к inbound'у (vless + tcp + tls/reality)
+        # либо когда включён мульти-inbound режим (XUI_INBOUND_IDS) и среди
+        # настроенных инбаундов заведомо есть inbound с reality+tls — там flow
+        # для vless ставим безусловно; в шаблоне может лежать пустой flow —
+        # тогда берём дефолт для vless.
+        multi_reality = len(self.inbound_ids) > 1 and await self._has_configured_reality()
+        flow_ok = protocol == "vless" and (
+            multi_reality or _flow_applies_to_all([inbound])
+        )
+        flow = ""
+        if flow_ok:
+            flow = template.get("flow") or "xtls-rprx-vision"
         client = {
             "id": client_uuid if protocol != "trojan" else secrets.token_urlsafe(16),
-            "flow": template.get("flow", "xtls-rprx-vision" if protocol == "vless" else ""),
+            "flow": flow,
             "email": email,
             "limitIp": max(1, devices),
             # limitHwid не передаём — см. пояснение в _create_client_clients_api.
@@ -570,11 +605,21 @@ def _as_dict(value: object) -> dict:
     return {}
 
 
+def _has_reality_inbound(inbounds: list[dict]) -> bool:
+    """True, если хотя бы один inbound использует reality (streamSettings.security)."""
+    for inbound in inbounds:
+        stream = _as_dict(inbound.get("streamSettings"))
+        if stream.get("security") == "reality":
+            return True
+    return False
+
+
 def _flow_applies_to_all(inbounds: list[dict]) -> bool:
     """flow (xtls-rprx-vision) корректен для всех inbound'ов: только vless поверх tcp+tls/reality.
 
-    При одном клиенте на несколько inbound'ов flow общий, поэтому в мульти-inbound
-    режиме его ставят, только если он уместен для каждого из них.
+    В мульти-inbound режиме (XUI_INBOUND_IDS) всегда присутствует inbound с
+    reality+tls, поэтому там flow ставится при наличии хотя бы одного reality
+    инбаунда (_has_reality_inbound) и эта строгая проверка не требуется.
     """
     for inbound in inbounds:
         if str(inbound.get("protocol") or "vless") != "vless":
