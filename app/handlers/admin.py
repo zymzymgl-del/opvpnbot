@@ -468,9 +468,9 @@ async def _render_users(call: CallbackQuery, db: Database, cfg: Config, page: in
             marks.append("🚫")
         if row["subs"]:
             marks.append("🟢")
-        elif row["subs_total"]:
-            # Подписки есть, но ни одна не действует (истекла/отключена) —
-            # клиент без доступа: подсвечиваем красным, а не пустым местом.
+        else:
+            # Действующей подписки нет: истекла/отключена или не выдавалась —
+            # клиент без доступа, поэтому всегда красный индикатор.
             marks.append("🔴")
         entry = f"{' '.join(marks)} <code>{row['telegram_id']}</code> {esc(name)}"
         lines.append(entry)

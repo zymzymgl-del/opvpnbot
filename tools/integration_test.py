@@ -426,6 +426,9 @@ async def run() -> None:
         expires_at=utcnow() - timedelta(days=1),
     )
     await db.update_subscription(red_sub, status="expired")
+    # Клиент, у которого подписок нет вовсе, тоже без доступа — тоже красный.
+    no_sub_user = 6300
+    await db.ensure_user(no_sub_user, "nosub", "Без подписки")
     OUT.clear()
     await dp.feed_update(bot, make_callback(777, "adm:users", 34))
     users_text = sent("message")
@@ -433,6 +436,8 @@ async def run() -> None:
            "🟢 <code>555</code>" in users_text, users_text[:400])
     expect("клиент с истёкшей подпиской отмечен 🔴",
            f"🔴 <code>{red_user}</code>" in users_text, users_text[:400])
+    expect("клиент без подписок отмечен 🔴",
+           f"🔴 <code>{no_sub_user}</code>" in users_text, users_text[:400])
 
     print("\n3b. Обслуживание: перезапуск бота и Xray")
     OUT.clear()
