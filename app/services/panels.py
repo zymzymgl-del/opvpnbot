@@ -272,13 +272,11 @@ class XuiPanel(BasePanel):
     async def _create_client_clients_api(self, inbounds: list[dict], *, user_id: int,
                                          days: int, devices: int, traffic_gb: int,
                                          plan_code: str) -> IssuedKey:
-        first = inbounds[0]
-        protocol = str(first.get("protocol") or "vless")
-        settings = self._clients(first)
-        template = settings[0] if settings else {}
         email = f"tg{user_id}_{plan_code}_{int(time.time())}"
         expiry_ms = int(now_plus(days).timestamp() * 1000)
-        flow = template.get("flow", "xtls-rprx-vision" if protocol == "vless" else "")
+        flow = _flow_for_inbounds(inbounds)
+        if flow and any(_inbound_supports_flow(i) and i.get("disableFlow") for i in inbounds):
+            log.warning("3x-ui: у inbound'а включён disableFlow — панель обнулит flow")
         client: dict[str, Any] = {
             "email": email,
             "enable": True,
@@ -295,7 +293,7 @@ class XuiPanel(BasePanel):
             # инбаундам с этим subId, поэтому разные шифрования попадут в одну подписку.
             "subId": secrets.token_hex(8),
         }
-        if protocol == "vless" and flow and (len(inbounds) == 1 or _flow_applies_to_all(inbounds)):
+        if flow:
             client["flow"] = flow
         await self._api(
             "/clients/add",
@@ -324,7 +322,7 @@ class XuiPanel(BasePanel):
                 inbound,
                 {
                     "id": self._client_identity(created, str(inbound.get("protocol") or "vless")),
-                    "flow": created.get("flow", ""),
+                    "flow": created.get("flow") or flow,
                     "email": email,
                 },
                 host,
@@ -394,9 +392,12 @@ class XuiPanel(BasePanel):
         client_uuid = str(uuid.uuid4())
         sub_id = secrets.token_hex(8)
         expiry_ms = int(now_plus(days).timestamp() * 1000)
+        flow = ""
+        if protocol == "vless" and _inbound_supports_flow(inbound):
+            flow = str(template.get("flow") or "") or "xtls-rprx-vision"
         client = {
             "id": client_uuid if protocol != "trojan" else secrets.token_urlsafe(16),
-            "flow": template.get("flow", "xtls-rprx-vision" if protocol == "vless" else ""),
+            "flow": flow,
             "email": email,
             "limitIp": max(1, devices),
             # limitHwid не передаём — см. пояснение в _create_client_clients_api.
@@ -570,19 +571,28 @@ def _as_dict(value: object) -> dict:
     return {}
 
 
-def _flow_applies_to_all(inbounds: list[dict]) -> bool:
-    """flow (xtls-rprx-vision) корректен для всех inbound'ов: только vless поверх tcp+tls/reality.
+def _inbound_supports_flow(inbound: dict) -> bool:
+    """xtls-rprx-vision применим только к vless поверх tcp+tls/reality.
 
-    При одном клиенте на несколько inbound'ов flow общий, поэтому в мульти-inbound
-    режиме его ставят, только если он уместен для каждого из них.
+    В 3.x flow хранится per-inbound: панель сама обнуляет его для несовместимых
+    инбаундов (clientWithInboundFlow), поэтому при смеси транспортов flow всё
+    равно нужно отправлять — лишний панель отбросит.
     """
+    if str(inbound.get("protocol") or "vless").lower() != "vless":
+        return False
+    stream = _as_dict(inbound.get("streamSettings"))
+    return stream.get("network", "tcp") == "tcp" and stream.get("security") in {"reality", "tls", "xtls"}
+
+
+def _flow_for_inbounds(inbounds: list[dict]) -> str:
+    """flow из шаблона первого подходящего inbound'а; пустое значение — vision."""
     for inbound in inbounds:
-        if str(inbound.get("protocol") or "vless") != "vless":
-            return False
-        stream = _as_dict(inbound.get("streamSettings"))
-        if stream.get("network", "tcp") != "tcp" or stream.get("security") not in {"reality", "tls", "xtls"}:
-            return False
-    return True
+        if not _inbound_supports_flow(inbound):
+            continue
+        clients = _as_dict(inbound.get("settings")).get("clients") or []
+        template = clients[0] if clients else {}
+        return str(template.get("flow") or "") or "xtls-rprx-vision"
+    return ""
 
 
 def _host_from_url(url: str) -> str:
@@ -647,7 +657,7 @@ def _build_link(inbound: dict, client: dict, host: str) -> str:
     query = "&".join(f"{k}={quote(str(v), safe='%')}" for k, v in params.items() if v not in (None, ""))
 
     if protocol == "vless":
-        if client.get("flow"):
+        if client.get("flow") and network == "tcp" and security in {"reality", "tls", "xtls"}:
             query += f"&flow={client['flow']}"
         return f"vless://{client['id']}@{host}:{port}?{query}#{quote(remark)}"
 

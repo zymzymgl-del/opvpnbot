@@ -345,11 +345,18 @@ class Database:
         return int(await self.scalar("SELECT COUNT(*) FROM users"))
 
     async def users_page(self, limit: int, offset: int) -> list[aiosqlite.Row]:
-        """Страница пользователей с числом активных подписок (для админ-списка)."""
+        """Страница пользователей со счётчиками подписок (для админ-списка).
+
+        ``subs`` — число действующих подписок (зелёный индикатор), ``subs_total`` —
+        все подписки пользователя, включая истёкшие и отключённые: если действующих
+        нет, а подписки есть, в списке горит красный индикатор.
+        """
         return await self.fetchall(
-            "SELECT u.*, (SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.telegram_id "
-            "AND s.status = 'active' AND s.expires_at > ?) AS subs FROM users u "
-            "ORDER BY u.last_seen_at DESC LIMIT ? OFFSET ?",
+            "SELECT u.*, "
+            "(SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.telegram_id "
+            "AND s.status = 'active' AND s.expires_at > ?) AS subs, "
+            "(SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.telegram_id) AS subs_total "
+            "FROM users u ORDER BY u.last_seen_at DESC LIMIT ? OFFSET ?",
             (to_iso(utcnow()), limit, offset),
         )
 

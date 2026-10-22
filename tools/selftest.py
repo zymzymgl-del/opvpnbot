@@ -64,7 +64,8 @@ from app.services.panels import (  # noqa: E402
     XuiPanel,
     _as_dict,
     _build_link,
-    _flow_applies_to_all,
+    _flow_for_inbounds,
+    _inbound_supports_flow,
     get_panel,
 )
 from app.services import panels as panels_mod  # noqa: E402
@@ -523,14 +524,29 @@ async def run() -> None:
     check("XUI_INBOUND_IDS разобран в список", multi_cfg.xui_inbound_ids == (1, 3, 7), str(multi_cfg.xui_inbound_ids))
     check("XuiPanel хранит список inbound'ов", XuiPanel(multi_cfg).inbound_ids == (1, 3, 7))
     os.environ.pop("XUI_INBOUND_IDS", None)
-    check("мульти-inbound: flow корректен для vless tcp+tls/reality", _flow_applies_to_all([
+    check("flow применим к vless tcp+tls/reality", all(_inbound_supports_flow(ib) for ib in (
         {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}'},
         {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "tls"}'},
-    ]))
-    check("мульти-inbound: ws/trojan отключают flow", not _flow_applies_to_all([
+    )))
+    check("flow не применим к ws/xhttp/grpc/trojan/vmess", not any(_inbound_supports_flow(ib) for ib in (
         {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
+        {"protocol": "vless", "streamSettings": '{"network": "xhttp", "security": "reality"}'},
+        {"protocol": "vless", "streamSettings": '{"network": "grpc", "security": "tls"}'},
         {"protocol": "trojan", "streamSettings": '{"network": "tcp", "security": "tls"}'},
-    ]))
+        {"protocol": "vmess", "streamSettings": '{"network": "tcp", "security": "tls"}'},
+    )))
+    check("flow берётся из reality-инбаунда, даже если он не первый", _flow_for_inbounds([
+        {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}', "settings": '{"clients": []}'},
+        {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}',
+         "settings": '{"clients": [{"flow": "xtls-rprx-vision"}]}'},
+    ]) == "xtls-rprx-vision")
+    check("пустой flow в шаблоне заменяется на vision", _flow_for_inbounds([
+        {"protocol": "vless", "streamSettings": '{"network": "tcp", "security": "reality"}',
+         "settings": '{"clients": [{"flow": ""}]}'},
+    ]) == "xtls-rprx-vision")
+    check("без подходящих inbound-ов flow пуст", _flow_for_inbounds([
+        {"protocol": "vless", "streamSettings": '{"network": "ws", "security": "tls"}'},
+    ]) == "")
     panel = get_panel(cfg, db)
     check("фабрика возвращает панель 3x-ui (заглушка)", panel is fake_panel)
 
@@ -543,6 +559,37 @@ async def run() -> None:
     check("update-тело: allowedIPs приводится к массиву", up["allowedIPs"] == [])
     check("update-тело: прочие поля сохраняются", up["limitIp"] == 2 and up["totalGB"] == 100)
 
+    print("\n8c. flow для reality-инбаунда (per-inbound в 3.x)")
+    ws_with_flow = _build_link(ws_inbound, {"id": "uuid-2", "flow": "xtls-rprx-vision", "email": "u2"}, "example.com")
+    check("ссылка ws не получает flow", "flow=" not in ws_with_flow, ws_with_flow)
+    reality_with_flow = _build_link(
+        vless_inbound, {"id": "uuid-1", "flow": "xtls-rprx-vision", "email": "u1"}, "1.2.3.4")
+    check("ссылка reality получает flow", "flow=xtls-rprx-vision" in reality_with_flow, reality_with_flow)
+
+    flow_panel = XuiPanel(load_config())
+    api_calls: list[tuple[str, dict | None]] = []
+
+    async def fake_panel_api(path, *, method="GET", payload=None):
+        api_calls.append((path, payload))
+        return {"success": True}
+
+    async def fake_panel_get_client(email):
+        return {"uuid": "uuid-flow", "flow": "xtls-rprx-vision", "subId": "sub-flow", "email": email}
+
+    flow_panel._api = fake_panel_api
+    flow_panel._get_client = fake_panel_get_client
+    issued = await flow_panel._create_client_clients_api(
+        [vless_inbound, ws_inbound], user_id=9001, days=30, devices=1, traffic_gb=10, plan_code="1m")
+    add_payload = api_calls[0][1] or {}
+    check("в /clients/add уходит flow",
+          add_payload.get("client", {}).get("flow") == "xtls-rprx-vision", str(add_payload.get("client")))
+    check("в /clients/add перечислены все inbound-ы", add_payload.get("inboundIds") == [1, 2],
+          str(add_payload.get("inboundIds")))
+    flow_links = issued.vpn_key.splitlines()
+    check("reality-ссылка с flow, ws-ссылка без flow",
+          len(flow_links) == 2 and "flow=xtls-rprx-vision" in flow_links[0] and "flow=" not in flow_links[1],
+          issued.vpn_key)
+
     print("\n9. Клавиатуры и статистика")
     check("главное меню собирается", main_menu(True, True) is not None)
     check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
@@ -550,6 +597,24 @@ async def run() -> None:
     stats = await db.stats()
     check("статистика считается", stats["users_total"] >= 3 and stats["revenue_total"] >= 299, str(stats["revenue_total"]))
 
+
+    print("\n9b. Админ-список пользователей: индикаторы подписок")
+    rows = await db.users_page(100, 0)
+    by_id = {int(row["telegram_id"]): row for row in rows}
+    active_row = by_id.get(1001)
+    inactive_row = by_id.get(3001)
+    no_sub_row = by_id.get(1003)
+    check("клиент с активной подпиской: subs > 0 (🟢)",
+          active_row is not None and int(active_row["subs"]) >= 1,
+          str(dict(active_row)) if active_row else "нет строки 1001")
+    check("отключённый/истёкший клиент: подписки есть, действующих нет (🔴)",
+          inactive_row is not None and int(inactive_row["subs"]) == 0
+          and int(inactive_row["subs_total"]) >= 1,
+          str(dict(inactive_row)) if inactive_row else "нет строки 3001")
+    check("клиент без подписок: оба счётчика нулевые",
+          no_sub_row is not None and int(no_sub_row["subs"]) == 0
+          and int(no_sub_row["subs_total"]) == 0,
+          str(dict(no_sub_row)) if no_sub_row else "нет строки 1003")
 
     print("\n10. Клиент ЮKassa (HTTP подменён заглушкой)")
     import json as _json

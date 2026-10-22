@@ -468,9 +468,14 @@ async def _render_users(call: CallbackQuery, db: Database, cfg: Config, page: in
             marks.append("🚫")
         if row["subs"]:
             marks.append("🟢")
+        elif row["subs_total"]:
+            # Подписки есть, но ни одна не действует (истекла/отключена) —
+            # клиент без доступа: подсвечиваем красным, а не пустым местом.
+            marks.append("🔴")
         entry = f"{' '.join(marks)} <code>{row['telegram_id']}</code> {esc(name)}"
         lines.append(entry)
-    lines.append("\nНажмите на ID в списке ниже, чтобы открыть карточку.")
+    lines.append("\n🚫 — заблокирован · 🟢 — активная подписка · 🔴 — нет действующей подписки")
+    lines.append("Нажмите на ID в списке ниже, чтобы открыть карточку.")
     ids = [int(row["telegram_id"]) for row in rows]
     buttons = [[InlineKeyboardButton(text=str(uid), callback_data=f"adm:user:card:{uid}")] for uid in ids]
     buttons.append([])

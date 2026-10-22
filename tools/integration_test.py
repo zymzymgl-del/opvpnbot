@@ -415,6 +415,25 @@ async def run() -> None:
            "Статистика" not in sent("message"),
            sent("message")[:80])
 
+    print("\n3a. Админ-список пользователей: индикаторы подписок")
+    # Клиент с недействующей (истёкшей/отключённой) подпиской должен гореть
+    # красным, а не оставаться без индикатора.
+    red_user = 6200
+    await db.ensure_user(red_user, "expired", "Истёкший")
+    red_sub = await db.create_subscription(
+        user_id=red_user, plan_code="1m", vpn_key="vless://old", sub_url=None,
+        panel="xui", panel_username="expired", devices=1, traffic_gb=0,
+        expires_at=utcnow() - timedelta(days=1),
+    )
+    await db.update_subscription(red_sub, status="expired")
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, "adm:users", 34))
+    users_text = sent("message")
+    expect("клиент с активной подпиской отмечен 🟢",
+           "🟢 <code>555</code>" in users_text, users_text[:400])
+    expect("клиент с истёкшей подпиской отмечен 🔴",
+           f"🔴 <code>{red_user}</code>" in users_text, users_text[:400])
+
     print("\n3b. Обслуживание: перезапуск бота и Xray")
     OUT.clear()
     await dp.feed_update(bot, make_callback(777, "adm:svc", 30))
