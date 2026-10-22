@@ -26,14 +26,18 @@ BTN_ADMIN = "⚙️ Админка"
 MAIN_MENU_TEXT = "🏠 <b>Главное меню</b>\n\nВыберите раздел:"
 
 
-def main_menu(is_admin: bool = False, trial_enabled: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню — полностью на инлайн-кнопках (callback_data)."""
+def main_menu(is_admin: bool = False, trial_available: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню — полностью на инлайн-кнопках (callback_data).
+
+    ``trial_available`` — показывать ли кнопку пробного периода: она скрывается,
+    если триал выключен в настройках или уже был активирован пользователем.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text=BTN_BUY, callback_data="menu:buy")
     builder.button(text=BTN_MY_KEYS, callback_data="menu:keys")
     builder.button(text=BTN_PROFILE, callback_data="menu:profile")
     builder.button(text=BTN_SUPPORT, callback_data="menu:support")
-    if trial_enabled:
+    if trial_available:
         builder.button(text=BTN_TRIAL, callback_data="menu:trial")
     builder.button(text=BTN_HELP, callback_data="menu:help")
     if is_admin:

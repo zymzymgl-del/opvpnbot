@@ -47,6 +47,7 @@ from app import __build__  # noqa: E402
 from app.config import is_absolute_url, load_config, validate  # noqa: E402
 from app.db import Database, from_iso, to_iso, utcnow  # noqa: E402
 from app.keyboards import (  # noqa: E402
+    BTN_TRIAL,
     admin_service_kb,
     main_menu,
     payment_methods_kb,
@@ -92,6 +93,15 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILED.append(f"{name} — {detail}")
         print(f"  ❌ {name} — {detail}")
+
+
+def _has_trial_button(markup) -> bool:
+    """Есть ли в клавиатуре кнопка пробного периода."""
+    return any(
+        button.text == BTN_TRIAL
+        for row in markup.inline_keyboard
+        for button in row
+    )
 
 
 class FakeBot:
@@ -405,6 +415,7 @@ async def run() -> None:
     check("первый захват триала успешен", await db.claim_trial(1003) is True)
     check("повторный захват триала отклонён", await db.claim_trial(1003) is False)
     check("флаг trial_used выставлен", int((await db.get_user(1003))["trial_used"]) == 1)
+    check("db.trial_used видит активацию", await db.trial_used(1003) is True)
     await db.set_user_field(1003, "trial_used", 0)
     check("после возврата права триал снова доступен", await db.claim_trial(1003) is True)
 
@@ -592,6 +603,8 @@ async def run() -> None:
 
     print("\n9. Клавиатуры и статистика")
     check("главное меню собирается", main_menu(True, True) is not None)
+    check("кнопка триала есть, пока он не использован", _has_trial_button(main_menu(False, True)))
+    check("кнопка триала скрыта после активации", not _has_trial_button(main_menu(False, False)))
     check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
     check("выбор способа оплаты собирается", payment_methods_kb(["yookassa"], 1) is not None)
     stats = await db.stats()

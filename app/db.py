@@ -341,6 +341,11 @@ class Database:
     async def get_user(self, telegram_id: int) -> Optional[aiosqlite.Row]:
         return await self.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
 
+    async def trial_used(self, telegram_id: int) -> bool:
+        """True, если пробный период уже активирован (флаг trial_used)."""
+        value = await self.scalar("SELECT trial_used FROM users WHERE telegram_id = ?", (telegram_id,))
+        return bool(int(value or 0))
+
     async def count_users(self) -> int:
         return int(await self.scalar("SELECT COUNT(*) FROM users"))
 

@@ -1234,5 +1234,5 @@ async def cmd_stats(message: Message, db: Database, cfg: Config) -> None:
     await message.answer(
         f"📊 Пользователей: {stats['users_total']}, подписок: {stats['subs_active']}, "
         f"выручка: {price(stats['revenue_total'], cfg.currency)}",
-        reply_markup=main_menu(True, rt.trial_enabled),
+        reply_markup=main_menu(True, rt.trial_enabled and not await db.trial_used(message.from_user.id)),
     )

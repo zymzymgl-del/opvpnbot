@@ -114,15 +114,21 @@ async def _working(call: CallbackQuery, text: str, markup=None) -> None:
     await _edit_or_answer(call, text, back_kb() if markup is None else markup)
 
 
-async def _show_main_menu(call: CallbackQuery, cfg: Config) -> None:
-    await _edit_or_answer(call, MAIN_MENU_TEXT, main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled))
+async def _main_menu_for(db: Database, cfg: Config, user_id: int) -> InlineKeyboardMarkup:
+    """Меню пользователя: кнопка пробного периода только пока он не активирован."""
+    trial_available = rt.trial_enabled and not await db.trial_used(user_id)
+    return main_menu(cfg.is_admin(user_id), trial_available)
 
 
-async def _send_menu_window(bot: Bot, message: Message, text: str, cfg: Config) -> None:
+async def _show_main_menu(call: CallbackQuery, cfg: Config, db: Database) -> None:
+    await _edit_or_answer(call, MAIN_MENU_TEXT, await _main_menu_for(db, cfg, call.from_user.id))
+
+
+async def _send_menu_window(bot: Bot, message: Message, text: str, cfg: Config, db: Database) -> None:
     """Показывает окно меню с инлайн-кнопками в едином окне чата."""
     await ui.ui_text(
         bot, message.chat.id, text,
-        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+        await _main_menu_for(db, cfg, message.from_user.id))
 
 
 #: Ключ в FSM-данных: id сообщения-«окна», которое правят шаги ввода текста.
@@ -187,7 +193,7 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
                          back_kb("menu:main", "🏠 В меню"))
         result = await bind_claim(bot, cfg, db, user.id, payload[len(CLAIM_PREFIX):])
         prefix = "🎉 " if result.ok else "⚠️ "
-        await _send_menu_window(bot, message, prefix + esc(result.message), cfg)
+        await _send_menu_window(bot, message, prefix + esc(result.message), cfg, db)
         return
 
     tail = "Все покупки — в «🔑 Моя подписка», профиль — в «👤 Профиль», вопросы — «🆘 Поддержка». Меню ниже 👇"
@@ -202,12 +208,12 @@ async def cmd_start(message: Message, cfg: Config, db: Database, bot: Bot, bot_u
     sub = await db.active_subscription(user.id)
     if sub is not None:
         greeting += f"\n🟢 Ваша подписка активна, осталось <b>{human_left(sub['expires_at'])}</b>."
-    await _send_menu_window(bot, message, greeting, cfg)
+    await _send_menu_window(bot, message, greeting, cfg, db)
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message, cfg: Config, bot: Bot) -> None:
-    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg)
+async def cmd_menu(message: Message, cfg: Config, db: Database, bot: Bot) -> None:
+    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg, db)
 
 
 #: Тексты кнопок старой reply-клавиатуры — для бесшовного перехода пользователей.
@@ -215,15 +221,15 @@ LEGACY_REPLY_TEXTS = {BTN_BUY, BTN_MY_KEYS, BTN_PROFILE, BTN_SUPPORT, BTN_TRIAL,
 
 
 @router.message(F.text.in_(LEGACY_REPLY_TEXTS))
-async def msg_legacy_reply_button(message: Message, cfg: Config, bot: Bot) -> None:
+async def msg_legacy_reply_button(message: Message, cfg: Config, db: Database, bot: Bot) -> None:
     """Нажатие кнопки со старой reply-клавиатуры: показываем инлайн-меню в окне."""
-    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg)
+    await _send_menu_window(bot, message, MAIN_MENU_TEXT, cfg, db)
 
 
 @router.callback_query(F.data == "menu:main")
-async def cb_main_menu(call: CallbackQuery, cfg: Config, state: FSMContext) -> None:
+async def cb_main_menu(call: CallbackQuery, cfg: Config, db: Database, state: FSMContext) -> None:
     await state.clear()
-    await _show_main_menu(call, cfg)
+    await _show_main_menu(call, cfg, db)
     await call.answer()
 
 
@@ -233,7 +239,7 @@ async def cb_noop(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "check:subscription")
-async def cb_check_subscription(call: CallbackQuery, cfg: Config, bot: Bot) -> None:
+async def cb_check_subscription(call: CallbackQuery, cfg: Config, db: Database, bot: Bot) -> None:
     if not cfg.required_channels:
         await call.answer("Подписка не требуется 🙂", show_alert=False)
         return
@@ -245,7 +251,7 @@ async def cb_check_subscription(call: CallbackQuery, cfg: Config, bot: Bot) -> N
         if member.status not in {"creator", "administrator", "member", "restricted"}:
             await call.answer("Вы ещё не подписались на все каналы 🙂", show_alert=True)
             return
-    await _show_main_menu(call, cfg)
+    await _show_main_menu(call, cfg, db)
     await call.answer("Готово! ✅")
 
 
@@ -486,7 +492,7 @@ async def cb_cancel_order(call: CallbackQuery, db: Database, cfg: Config) -> Non
         await call.answer("Заказ не найден.", show_alert=True)
         return
     if order["status"] != "pending":
-        await _show_main_menu(call, cfg)
+        await _show_main_menu(call, cfg, db)
         await call.answer("Заказ уже неактуален.", show_alert=True)
         return
     if order["promo_code"] and int(order["promo_reserved"] or 0):
@@ -497,7 +503,7 @@ async def cb_cancel_order(call: CallbackQuery, db: Database, cfg: Config) -> Non
     await _edit_or_answer(
         call,
         "❌ Заказ отменён. Если оплата уже ушла — напишите в поддержку.\n\n" + MAIN_MENU_TEXT,
-        main_menu(cfg.is_admin(call.from_user.id), rt.trial_enabled),
+        await _main_menu_for(db, cfg, call.from_user.id),
     )
     await call.answer("Заказ отменён")
 
@@ -1183,7 +1189,7 @@ async def msg_ticket_message(message: Message, state: FSMContext, db: Database, 
     await db.add_ticket_message(ticket_id, False, text)
     await _apply_window(bot, message.chat.id, window_id,
                         f"✅ Сообщение отправлено в поддержку (обращение #{ticket_id}). Ответ придёт сюда же.",
-                        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+                        await _main_menu_for(db, cfg, message.from_user.id))
     await notify_admins(
         bot, cfg,
         f"💬 <b>Обращение #{ticket_id}</b> — новое сообщение от <code>{message.from_user.id}</code>:\n{esc(text)}",
@@ -1199,7 +1205,7 @@ async def msg_ticket_reply(message: Message, state: FSMContext, db: Database, cf
     text = message.text or message.caption or "[вложение]"
     await db.add_ticket_message(ticket_id, False, text)
     await _apply_window(bot, message.chat.id, window_id, "✅ Отправлено. Ответ придёт в этот чат.",
-                        main_menu(cfg.is_admin(message.from_user.id), rt.trial_enabled))
+                        await _main_menu_for(db, cfg, message.from_user.id))
     await notify_admins(bot, cfg, f"💬 <b>Обращение #{ticket_id}</b>: сообщение от <code>{message.from_user.id}</code>\n{esc(text)}")
 
 
