@@ -68,7 +68,7 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | Функция                 | Описание                                                                                     |
 | ----------------------- | -------------------------------------------------------------------------------------------- |
 | 🛒 Витрина тарифов      | Цены, сроки, лимиты трафика и устройств — редактируются из админки без перезапуска           |
-| 💳 Оплата               | Карта РФ / СБП / SberPay через **ЮKassa**                                                    |
+| 💳 Оплата               | Карта РФ / СБП / SberPay через **ЮKassa** или ручной перевод с подтверждением админом        |
 | 🎟 Промокоды            | Процент или фиксированная сумма, лимит активаций и срок действия                             |
 | 🎁 Пробный период       | Бесплатный доступ на N дней один раз на пользователя                                         |
 | 🔑 Мои ключи            | Карточка подписки, ссылка-конфиг, подписка, **QR-код**, инструкция под конкретное приложение |
@@ -117,8 +117,9 @@ cp .env.example .env && nano .env       # токен, админы, оплата
 | Способ     | Что нужно                                                      | Подробно                                         |
 | ---------- | -------------------------------------------------------------- | ------------------------------------------------ |
 | `yookassa` | `YOOKASSA_SHOP_ID` + `YOOKASSA_SECRET_KEY`, при желании вебхук | [docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md) |
+| `manual`   | Только текст инструкции `MANUAL_PAYMENT_NOTE`; оплату подтверждает админ в «💰 Заказы» | [docs/SETUP-PAYMENTS.md](docs/SETUP-PAYMENTS.md) |
 
-Список активных способов — переменная `PAYMENT_METHODS=yookassa`.
+Список активных способов — переменная `PAYMENT_METHODS` (например, `yookassa,manual`).
 
 ---
 
@@ -235,11 +236,12 @@ TG_WEBHOOK_SECRET=
 | `VPN_PANEL`                                        | `xui`                                                                                        |
 | `XUI_VERIFY_SSL`, `XUI_CA_FILE`                    | Проверка TLS-сертификата панели (по умолчанию `true`); свой CA для self-signed               |
 | `CLAIM_ENABLED`, `CLAIM_SECRET`, `CLAIM_TTL_HOURS` | Привязка существующих клиентов 3x-ui к боту по QR/ссылке (только `xui`); срок ссылки в часах |
-| `PAYMENT_METHODS`                                  | `yookassa`                                                                                   |
+| `PAYMENT_METHODS`                                  | `yookassa`, `manual` (можно несколько через запятую)                                         |
 | `TRIAL_ENABLED`, `TRIAL_DAYS`                      | Пробный период                                                                               |
 | `MAX_PENDING_ORDERS`                               | Лимит неоплаченных заказов на пользователя (запасной предохранитель; пока есть хоть один незакрытый заказ, новый не создаётся) |
 | `REQUIRED_CHANNELS`                                | `@ch1,@ch2` — обязательная подписка (бот должен быть админом канала)                         |
 | `YOOKASSA_*`                                       | Доступы магазина ЮKassa (shopId + секретный ключ)                                            |
+| `MANUAL_PAYMENT_NOTE`                              | Инструкция/реквизиты для ручной оплаты (включается `PAYMENT_METHODS=...,manual`)             |
 | `WEBHOOK_ENABLED`, `WEBHOOK_PUBLIC_URL`            | Приём уведомлений ЮKassa (нужен публичный HTTPS)                                             |
 | `TG_WEBHOOK_ENABLED`, `TG_WEBHOOK_URL`, `TG_WEBHOOK_SECRET` | Апдейты Telegram вебхуком вместо long-polling (пустой `SECRET` и неверный URL — ошибка на старте) |
 | `TG_WEBHOOK_FAST_ACK`                              | `true` — отвечать Telegram 200 сразу, обработку вести в фоне (нужно при долгой выдаче в панели) |
@@ -264,6 +266,7 @@ TG_WEBHOOK_SECRET=
 - [ ] `XUI_VERIFY_SSL=true` (по умолчанию) и `XUI_CA_FILE`, если сертификат панели самоподписанный
 - [ ] `XUI_SUB_BASE` — если нужна одна ссылка-подписка на несколько inbound'ов
 - [ ] `PAYMENT_METHODS=yookassa` + `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` (боевой магазин; `YOOKASSA_TEST=false`)
+  либо `PAYMENT_METHODS=manual` + `MANUAL_PAYMENT_NOTE` (подтверждение оплат вручную из админки)
 - [ ] `WEBHOOK_ENABLED=true` + `WEBHOOK_PUBLIC_URL`, и тот же адрес прописан в кабинете ЮKassa
 - [ ] `TG_WEBHOOK_ENABLED=true` + `TG_WEBHOOK_URL` (путь ≠ `WEBHOOK_PATH`) + `TG_WEBHOOK_SECRET` — если апдейты Telegram идут вебхуком
 

@@ -352,8 +352,12 @@ async def cb_order_action(call: CallbackQuery, db: Database, cfg: Config, bot: B
         await safe_answer(call)
         await _working(call, "⏳ Выдаю доступ…", back_kb("adm:orders", "◀️ К заказам"))
         try:
-            await complete_order(bot, cfg, db, order_id,
-                                 payment_id=order["payment_id"] or f"admin:{call.from_user.id}")
+            manual = order["method"] == "manual"
+            await complete_order(
+                bot, cfg, db, order_id,
+                payment_id=f"admin:{call.from_user.id}" if manual
+                else (order["payment_id"] or f"admin:{call.from_user.id}"),
+            )
         except PanelError as exc:
             await call.message.edit_text(
                 f"⚠️ Не удалось выдать ключ: {esc(exc)}",

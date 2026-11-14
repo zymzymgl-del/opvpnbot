@@ -142,6 +142,7 @@ class Config:
     yookassa_secret_key: str
     yookassa_return_url: str
     yookassa_test: bool
+    manual_payment_note: str
     payments_proxy: str
 
     # --- Панель выдачи ключей ---
@@ -253,6 +254,7 @@ def load_config() -> Config:
         yookassa_secret_key=_str("YOOKASSA_SECRET_KEY"),
         yookassa_return_url=_str("YOOKASSA_RETURN_URL", "https://t.me"),
         yookassa_test=_bool("YOOKASSA_TEST", False),
+        manual_payment_note=_str("MANUAL_PAYMENT_NOTE", "Реквизиты уточняйте у поддержки."),
         payments_proxy=_str("PAYMENTS_PROXY"),
         panel=_str("VPN_PANEL", "xui").lower(),
         xui_url=_str("XUI_URL").rstrip("/"),

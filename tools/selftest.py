@@ -32,7 +32,7 @@ os.environ.update({
     "VPN_PANEL": "xui",
     "XUI_URL": "http://127.0.0.1:2053",
     "XUI_API_TOKEN": "test-token",
-    "PAYMENT_METHODS": "yookassa",
+    "PAYMENT_METHODS": "yookassa,manual",
     # Ключи задаём заранее: validate(cfg) требует их при включённом yookassa,
     # а тест клиента ЮKassa (раздел 10) всё равно перезапишет эти переменные.
     "YOOKASSA_SHOP_ID": "123456",
@@ -607,6 +607,11 @@ async def run() -> None:
     check("кнопка триала скрыта после активации", not _has_trial_button(main_menu(False, False)))
     check("список тарифов собирается", plans_kb(await db.active_plans()) is not None)
     check("выбор способа оплаты собирается", payment_methods_kb(["yookassa"], 1) is not None)
+    manual_kb = payment_methods_kb(["yookassa", "manual"], 1)
+    check("кнопка ручной оплаты показана",
+          any(btn.text == "🧾 Оплачу вручную" and btn.callback_data == "pay:manual:1"
+              for row in manual_kb.inline_keyboard for btn in row),
+          str([[btn.text for btn in row] for row in manual_kb.inline_keyboard]))
     stats = await db.stats()
     check("статистика считается", stats["users_total"] >= 3 and stats["revenue_total"] >= 299, str(stats["revenue_total"]))
 

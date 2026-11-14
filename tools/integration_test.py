@@ -27,7 +27,7 @@ os.environ.update({
     "VPN_PANEL": "xui",
     "XUI_URL": "http://127.0.0.1:2053",
     "XUI_API_TOKEN": "test-token",
-    "PAYMENT_METHODS": "yookassa",
+    "PAYMENT_METHODS": "yookassa,manual",
     "TRIAL_ENABLED": "true",
     "TRIAL_DAYS": "3",
     "CLAIM_ENABLED": "true",
@@ -302,7 +302,34 @@ async def run() -> None:
            any("уже оплачен" in a for a in CALLBACK_ANSWERS), str(CALLBACK_ANSWERS))
     expect("повторная оплата не создаёт новый счёт", yk.created == created_before, str(yk.created))
 
-    print("\n1c. «Одно окно»: смена тарифа в одном заказе")
+    print("\n1c. Ручная оплата")
+    manual_user = 880001
+    await db.ensure_user(manual_user, "manualpayer", "Ручной Плательщик")
+    manual_order = await db.create_order(
+        user_id=manual_user, plan_code="1m", amount=150, base_amount=150,
+        promo_code=None, method="none", kind="subscription",
+    )
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(manual_user, f"pay:manual:{manual_order}", 70))
+    manual_row = await db.get_order(manual_order)
+    expect("ручная оплата: способ заказа сохранён",
+           manual_row["method"] == "manual", str(manual_row["method"]))
+    expect("ручная оплата: инструкция показана",
+           "Оплата заказа" in sent("message") and "поддержк" in sent("message"),
+           sent("message")[:140])
+
+    OUT.clear()
+    await dp.feed_update(bot, make_callback(777, f"adm:order:approve:{manual_order}", 71))
+    manual_row = await db.get_order(manual_order)
+    expect("ручная оплата: админ подтвердил заказ", manual_row["status"] == "paid",
+           str(manual_row["status"]))
+    expect("ручная оплата: подписка выдана",
+           await db.active_subscription(manual_user) is not None)
+    expect("ручная оплата: платёж записан от админа",
+           (manual_row["payment_id"] or "").startswith("admin:"),
+           str(manual_row["payment_id"]))
+
+    print("\n1d. «Одно окно»: смена тарифа в одном заказе")
     sw_user = 6600
     await db.ensure_user(sw_user, "switcher", "Сменщик")
     OUT.clear()

@@ -469,6 +469,10 @@ class Database:
         """Снимает резерв промокода на заказе (при отмене заказа)."""
         await self.execute("UPDATE orders SET promo_reserved = 0 WHERE id = ?", (order_id,))
 
+    async def set_order_method(self, order_id: int, method: str) -> None:
+        """Фиксирует выбранный клиентом способ оплаты (например, manual)."""
+        await self.execute("UPDATE orders SET method = ? WHERE id = ?", (method, order_id))
+
     async def set_order_promo(self, order_id: int, amount: int, discount: int, promo_code: str) -> None:
         """Применяет промокод к заказу: новая сумма/скидка и резерв использования.
 

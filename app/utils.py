@@ -26,6 +26,7 @@ STATUS_RU = {
 
 METHOD_RU = {
     "yookassa": "карта/СБП (ЮKassa)",
+    "manual": "вручную",
 }
 
 

@@ -279,7 +279,7 @@ collect_config() {
   for __k in BOT_TOKEN ADMIN_IDS BOT_NAME PAYMENT_METHODS \
              VPN_PANEL XUI_URL XUI_API_TOKEN XUI_USERNAME XUI_PASSWORD \
              XUI_INBOUND_IDS XUI_PUBLIC_HOST CLAIM_ENABLED CLAIM_SECRET \
-             YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY \
+             YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY MANUAL_PAYMENT_NOTE \
              WEBHOOK_ENABLED WEBHOOK_PUBLIC_URL WEBHOOK_TRUST_PROXY \
              TG_WEBHOOK_ENABLED TG_WEBHOOK_URL TG_WEBHOOK_SECRET; do
     seed_from_env "$__k"
@@ -387,6 +387,7 @@ write_env() {
 
   put_env "$env_file" YOOKASSA_SHOP_ID "${YOOKASSA_SHOP_ID:-}"
   put_env "$env_file" YOOKASSA_SECRET_KEY "${YOOKASSA_SECRET_KEY:-}"
+  put_env "$env_file" MANUAL_PAYMENT_NOTE "${MANUAL_PAYMENT_NOTE:-Реквизиты уточняйте у поддержки.}"
   if [ "${WEBHOOK_ENABLED:-false}" = "true" ]; then
     set_env "$env_file" WEBHOOK_ENABLED true
     put_env "$env_file" WEBHOOK_PUBLIC_URL "${WEBHOOK_PUBLIC_URL:-}"

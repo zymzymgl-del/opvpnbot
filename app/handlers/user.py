@@ -87,8 +87,11 @@ FAQ_TEXT = (
 
 
 def _methods_line(cfg: Config) -> str:
-    """Человеческий список включённых способов оплаты (без служебного «none»)."""
-    names = [METHOD_RU[m] for m in cfg.payment_methods if m in METHOD_RU]
+    """Человеческий список включённых способов оплаты (без служебного «none»).
+
+    Ручная оплата не анонсируется в витрине: она доступна кнопкой в заказе.
+    """
+    names = [METHOD_RU[m] for m in cfg.payment_methods if m in METHOD_RU and m != "manual"]
     return ", ".join(names) if names else "по согласованию с поддержкой"
 
 
@@ -672,11 +675,33 @@ async def cb_pay(call: CallbackQuery, db: Database, cfg: Config, bot: Bot, yk=No
             await call.answer("Заказ уже неактуален.", show_alert=True)
         return
     amount = int(order["amount"])
+    if action == "manual" and "manual" not in cfg.payment_methods:
+        await call.answer("Ручная оплата отключена.", show_alert=True)
+        return
 
     # Отвечаем на нажатие СРАЗУ: дальше идут запросы в ЮKassa и выдача в панели
     # (до 15–20 с на каждый), а Telegram отклоняет ответ, отправленный позже ~30 с
     # («query is too old…»). Спиннер гаснет сразу, а все результаты — в едином окне.
     await ui.safe_answer(call)
+
+    if action == "manual":
+        await db.set_order_method(order_id, "manual")
+        await _edit_or_answer(
+            call,
+            f"🧾 <b>Оплата заказа #{order_id}</b>\n\n"
+            f"Сумма: <b>{price(amount, cfg.currency)}</b>\n\n"
+            f"{esc(cfg.manual_payment_note)}\n\n"
+            "После оплаты пришлите в поддержку чек или скриншот и номер заказа — "
+            "администратор подтвердит платёж, и ключ придёт автоматически.",
+            back_kb("menu:support", "🆘 Написать в поддержку"),
+        )
+        await notify_admins(
+            bot, cfg,
+            f"🧾 <b>Ручная оплата</b>\nЗаказ #{order_id}\n"
+            f"Пользователь: <code>{call.from_user.id}</code> (@{call.from_user.username or '—'})\n"
+            f"Сумма: {price(amount, cfg.currency)}",
+        )
+        return
 
     if action == "check":
         # Пользователь ждёт: ниже опрос ЮKassa по всем счетам заказа и выдача

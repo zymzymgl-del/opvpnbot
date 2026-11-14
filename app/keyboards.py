@@ -87,6 +87,8 @@ def payment_methods_kb(available: Iterable[str], order_id: int) -> InlineKeyboar
     for method in available:
         if method == "yookassa":
             builder.button(text="💳 Карта / СБП", callback_data=f"pay:yookassa:{order_id}")
+        elif method == "manual":
+            builder.button(text="🧾 Оплачу вручную", callback_data=f"pay:manual:{order_id}")
     builder.button(text="🎟 Промокод", callback_data=f"promo:order:{order_id}")
     builder.button(text="🔁 Сменить тариф", callback_data=f"order:plans:{order_id}")
     builder.button(text="❌ Отменить заказ", callback_data=f"order:cancel:{order_id}")
